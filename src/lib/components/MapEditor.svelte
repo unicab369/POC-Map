@@ -11,6 +11,7 @@
 	} = $props();
 
 	let mapContainer: HTMLDivElement;
+	let fabColumnEl: HTMLDivElement;
 	let map: any;
 	let shapeLayers: any[] = [];
 	let floorBackgroundLayer: any = null;
@@ -40,7 +41,7 @@
 	let zoneClickedFlag = false;
 
 	// Toolbar selection state (works for both zones and areas)
-	type EditingTarget = { type: 'zone'; zoneId: string } | { type: 'area'; zoneId: string; areaId: string };
+	type EditingTarget = { type: 'zone'; zoneId: string } | { type: 'area'; zoneId: string; areaId: string } | { type: 'spot'; zoneId: string; areaId: string; spotId: string };
 	let editingTarget = $state<EditingTarget | null>(null);
 	let editingTargetLayer: any = null;
 	let toolbarPosition = $state<{ x: number; y: number } | null>(null);
@@ -73,6 +74,8 @@
 	let overlayImageUrl = $state('');
 	let overlayOpacity = $state(0.5);
 	let overlayLayer: any = null;
+	let overlayRotation = $state(0);
+	let overlayCornerMarkers: any[] = [];
 
 	// Side panel live editing state
 	let panelName = $state('');
@@ -81,6 +84,7 @@
 	let panelOpacity = $state(0.85);
 	let panelStroke = $state('#cbd5e1');
 	let panelStrokeWidth = $state(1);
+	let panelDescription = $state('');
 
 	const categories: POICategory[] = ['food', 'attraction', 'shop', 'restroom', 'info', 'gate', 'security'];
 
@@ -157,21 +161,23 @@
 		return venue.zones.find(z => z.id === editingZoneId);
 	}
 
-	/** Returns the zone or area entity currently selected by the toolbar */
-	function getEditingEntity(): (Zone | Area) | undefined {
+	/** Returns the zone, area, or spot entity currently selected by the toolbar */
+	function getEditingEntity(): (Zone | Area | Spot) | undefined {
 		if (!editingTarget) return undefined;
 		const zone = venue.zones.find(z => z.id === editingTarget!.zoneId);
 		if (!zone) return undefined;
 		if (editingTarget.type === 'zone') return zone;
-		return zone.areas.find(a => a.id === editingTarget!.areaId);
+		const area = zone.areas.find(a => a.id === (editingTarget as any).areaId);
+		if (editingTarget.type === 'area') return area;
+		return area?.spots.find(s => s.id === (editingTarget as any).spotId);
 	}
 
 	function getEditingEntityLevel(): DrawLevel {
-		return editingTarget?.type === 'area' ? 'area' : 'zone';
+		return editingTarget?.type ?? 'zone';
 	}
 
 	function getEditingEntityLabelClass(): string {
-		return editingTarget?.type === 'area' ? 'label-area' : 'label-zone';
+		return `label-${editingTarget?.type ?? 'zone'}`;
 	}
 
 	function selectEntityForToolbar(target: EditingTarget, layer: any) {
@@ -316,10 +322,10 @@
 				}
 			}
 			venue.zones = [...venue.zones, cloned];
-		} else {
+		} else if (editingTarget.type === 'area') {
 			const zone = venue.zones.find(z => z.id === editingTarget!.zoneId);
 			if (!zone) return;
-			const area = zone.areas.find(a => a.id === editingTarget!.areaId);
+			const area = zone.areas.find(a => a.id === (editingTarget as any).areaId);
 			if (!area) return;
 			const cloned: Area = JSON.parse(JSON.stringify(area));
 			cloned.id = generateId('area');
@@ -330,6 +336,18 @@
 				spot.shape = applyDelta(spot.shape, 20, 20);
 			}
 			zone.areas = [...zone.areas, cloned];
+		} else if (editingTarget.type === 'spot') {
+			const zone = venue.zones.find(z => z.id === editingTarget!.zoneId);
+			if (!zone) return;
+			const area = zone.areas.find(a => a.id === (editingTarget as any).areaId);
+			if (!area) return;
+			const spot = area.spots.find(s => s.id === (editingTarget as any).spotId);
+			if (!spot) return;
+			const cloned: Spot = JSON.parse(JSON.stringify(spot));
+			cloned.id = generateId('spot');
+			cloned.name = spot.name + ' (copy)';
+			cloned.shape = applyDelta(cloned.shape, 20, 20);
+			area.spots = [...area.spots, cloned];
 		}
 		venue = { ...venue };
 		deselectEntity();
@@ -341,10 +359,17 @@
 		if (!editingTarget) return;
 		if (editingTarget.type === 'zone') {
 			venue.zones = venue.zones.filter(z => z.id !== editingTarget!.zoneId);
-		} else {
+		} else if (editingTarget.type === 'area') {
 			const zone = venue.zones.find(z => z.id === editingTarget!.zoneId);
 			if (zone) {
-				zone.areas = zone.areas.filter(a => a.id !== editingTarget!.areaId);
+				zone.areas = zone.areas.filter(a => a.id !== (editingTarget as any).areaId);
+			}
+		} else if (editingTarget.type === 'spot') {
+			const zone = venue.zones.find(z => z.id === editingTarget!.zoneId);
+			if (!zone) return;
+			const area = zone.areas.find(a => a.id === (editingTarget as any).areaId);
+			if (area) {
+				area.spots = area.spots.filter(s => s.id !== (editingTarget as any).spotId);
 			}
 		}
 		venue = { ...venue };
@@ -356,12 +381,14 @@
 	const colorSwatches = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#10b981', '#3b82f6', '#8b5cf6', '#ec4899', '#6b7280', '#1e293b', '#ffffff', '#fbbf24', '#0ea5e9'];
 	const strokeSwatches = ['#cbd5e1', '#94a3b8', '#475569', '#1e293b', '#ffffff', '#000000'];
 
-	function getEditModeEntity(): (Zone | Area) | undefined {
+	function getEditModeEntity(): (Zone | Area | Spot) | undefined {
 		if (!editModeTarget) return undefined;
 		const zone = venue.zones.find(z => z.id === editModeTarget.zoneId);
 		if (!zone) return undefined;
 		if (editModeTarget.type === 'zone') return zone;
-		return zone.areas.find(a => a.id === editModeTarget.areaId);
+		const area = zone.areas.find(a => a.id === (editModeTarget as any).areaId);
+		if (editModeTarget.type === 'area') return area;
+		return area?.spots.find(s => s.id === (editModeTarget as any).spotId);
 	}
 
 	function enterEditMode() {
@@ -371,7 +398,9 @@
 			const zone = venue.zones.find(z => z.id === target.zoneId);
 			if (!zone) return undefined;
 			if (target.type === 'zone') return zone;
-			return zone.areas.find(a => a.id === (target as any).areaId);
+			const area = zone.areas.find(a => a.id === (target as any).areaId);
+			if (target.type === 'area') return area;
+			return area?.spots.find(s => s.id === (target as any).spotId);
 		})();
 		if (!entity) return;
 
@@ -388,6 +417,7 @@
 		panelOpacity = entity.style.opacity ?? 0.85;
 		panelStroke = entity.style.stroke ?? '#cbd5e1';
 		panelStrokeWidth = entity.style.strokeWidth ?? 1;
+		panelDescription = 'description' in entity ? (entity as Spot).description : '';
 
 		// Deselect toolbar/zone editing
 		deselectEntity();
@@ -448,9 +478,9 @@
 					if (spotLayer) { spotLayer.addTo(map); shapeLayers.push(spotLayer); }
 				}
 			}
-		} else {
+		} else if (editModeTarget.type === 'area') {
 			// Editing an area: show only the area + its spots
-			const area = zone.areas.find(a => a.id === editModeTarget!.areaId);
+			const area = zone.areas.find(a => a.id === (editModeTarget as any).areaId);
 			if (!area) return;
 			const areaLayer = shapeDefToLayer(area.shape, area.style, area.name, 'area', converter);
 			if (areaLayer) {
@@ -462,6 +492,19 @@
 			for (const spot of area.spots) {
 				const spotLayer = shapeDefToLayer(spot.shape, spot.style, spot.name, 'spot', converter);
 				if (spotLayer) { spotLayer.addTo(map); shapeLayers.push(spotLayer); }
+			}
+		} else if (editModeTarget.type === 'spot') {
+			// Editing a spot: show only the spot with vertex editing
+			const area = zone.areas.find(a => a.id === (editModeTarget as any).areaId);
+			if (!area) return;
+			const spot = area.spots.find(s => s.id === (editModeTarget as any).spotId);
+			if (!spot) return;
+			const spotLayer = shapeDefToLayer(spot.shape, spot.style, spot.name, 'spot', converter);
+			if (spotLayer) {
+				spotLayer.addTo(map);
+				shapeLayers.push(spotLayer);
+				editModeLayer = spotLayer;
+				spotLayer.pm.enable({ allowSelfIntersection: false });
 			}
 		}
 	}
@@ -498,7 +541,7 @@
 		venue = { ...venue };
 		renderExistingShapes();
 
-		// Re-add Geoman controls
+		// Re-enable Geoman without toolbar UI
 		map.pm.addControls({
 			position: 'bottomright',
 			drawCircleMarker: false,
@@ -508,6 +551,7 @@
 			cutPolygon: false,
 			rotateMode: false
 		});
+		map.pm.removeControls();
 
 		// Invalidate map size since the container changed back, then fit to venue bounds
 		setTimeout(() => {
@@ -534,8 +578,8 @@
 			entity.name = panelName.trim();
 			venue = { ...venue };
 			if (editModeLayer) {
-				const level = editModeTarget?.type === 'area' ? 'area' : 'zone';
-				const cls = level === 'area' ? 'label-area' : 'label-zone';
+				const level = editModeTarget?.type ?? 'zone';
+				const cls = `label-${level}`;
 				editModeLayer.unbindTooltip();
 				editModeLayer.bindTooltip(entity.name, { permanent: true, direction: 'right', className: cls });
 			}
@@ -545,7 +589,7 @@
 	function panelUpdateCategory(cat: POICategory) {
 		const entity = getEditModeEntity();
 		if (entity) {
-			const level = editModeTarget?.type === 'area' ? 'area' : 'zone';
+			const level = editModeTarget?.type ?? 'zone';
 			panelCategory = cat;
 			entity.category = cat;
 			entity.style = defaultStyle(level, cat);
@@ -578,6 +622,14 @@
 				color: panelStroke,
 				weight: panelStrokeWidth
 			});
+			venue = { ...venue };
+		}
+	}
+
+	function panelUpdateDescription() {
+		const entity = getEditModeEntity();
+		if (entity && 'description' in entity) {
+			(entity as Spot).description = panelDescription;
 			venue = { ...venue };
 		}
 	}
@@ -725,6 +777,11 @@
 
 		// Keep overlay behind shape layers
 		overlayLayer.bringToBack();
+
+		setTimeout(() => {
+			createOverlayCornerMarkers();
+			hookOverlayRotation();
+		}, 50);
 	}
 
 	function updateOverlayOpacity() {
@@ -734,6 +791,7 @@
 	}
 
 	function removeOverlayFromMap() {
+		removeOverlayCornerMarkers();
 		if (overlayLayer && map) {
 			map.removeLayer(overlayLayer);
 			overlayLayer = null;
@@ -747,6 +805,106 @@
 		}
 		overlayImageUrl = '';
 		overlayOpacity = 0.5;
+		overlayRotation = 0;
+	}
+
+	function createOverlayCornerMarkers() {
+		if (!overlayLayer || !map) return;
+		removeOverlayCornerMarkers();
+		const L = (window as any).L;
+		const bounds = overlayLayer.getBounds();
+		const corners = [
+			bounds.getSouthWest(),
+			bounds.getSouthEast(),
+			bounds.getNorthEast(),
+			bounds.getNorthWest()
+		];
+
+		for (let i = 0; i < 4; i++) {
+			const icon = L.divIcon({
+				className: 'overlay-corner-handle',
+				iconSize: [14, 14],
+				iconAnchor: [7, 7]
+			});
+			const marker = L.marker(corners[i], {
+				icon,
+				draggable: true,
+				zIndexOffset: 10000
+			}).addTo(map);
+
+			marker.on('drag', () => handleCornerDrag(i, marker.getLatLng()));
+			marker.on('dragend', () => handleCornerDragEnd());
+			overlayCornerMarkers.push(marker);
+		}
+	}
+
+	function handleCornerDrag(cornerIndex: number, newLatLng: any) {
+		if (!overlayLayer) return;
+		const L = (window as any).L;
+		const bounds = overlayLayer.getBounds();
+		let south = bounds.getSouth();
+		let west = bounds.getWest();
+		let north = bounds.getNorth();
+		let east = bounds.getEast();
+
+		switch (cornerIndex) {
+			case 0: south = newLatLng.lat; west = newLatLng.lng; break;
+			case 1: south = newLatLng.lat; east = newLatLng.lng; break;
+			case 2: north = newLatLng.lat; east = newLatLng.lng; break;
+			case 3: north = newLatLng.lat; west = newLatLng.lng; break;
+		}
+
+		if (south >= north || west >= east) return;
+
+		const newBounds = L.latLngBounds([south, west], [north, east]);
+		overlayLayer.setBounds(newBounds);
+
+		const updatedCorners = [
+			newBounds.getSouthWest(),
+			newBounds.getSouthEast(),
+			newBounds.getNorthEast(),
+			newBounds.getNorthWest()
+		];
+		for (let i = 0; i < 4; i++) {
+			if (i !== cornerIndex && overlayCornerMarkers[i]) {
+				overlayCornerMarkers[i].setLatLng(updatedCorners[i]);
+			}
+		}
+	}
+
+	function handleCornerDragEnd() {
+		applyOverlayRotation();
+	}
+
+	function removeOverlayCornerMarkers() {
+		for (const marker of overlayCornerMarkers) {
+			if (map) map.removeLayer(marker);
+		}
+		overlayCornerMarkers = [];
+	}
+
+	function applyOverlayRotation() {
+		if (!overlayLayer) return;
+		const el = overlayLayer.getElement();
+		if (!el) return;
+		const currentTransform = el.style.transform || '';
+		const cleaned = currentTransform.replace(/\s*rotate\([^)]*\)/, '');
+		el.style.transform = cleaned + ` rotate(${overlayRotation}deg)`;
+		el.style.transformOrigin = 'center center';
+	}
+
+	function hookOverlayRotation() {
+		if (!overlayLayer) return;
+		const originalReset = overlayLayer._reset;
+		if (!originalReset) return;
+		overlayLayer._reset = function () {
+			originalReset.call(this);
+			applyOverlayRotation();
+		};
+	}
+
+	function updateOverlayRotation() {
+		applyOverlayRotation();
 	}
 
 	function computeShapeDelta(oldShape: ShapeDef, newShape: ShapeDef): { dx: number; dy: number } {
@@ -874,8 +1032,8 @@
 				return;
 			}
 			if (editingTarget) {
-				// If an area is selected (not via zone drag), just deselect entity
-				if (editingTarget.type === 'area') {
+				// If an area or spot is selected (not via zone drag), just deselect entity
+				if (editingTarget.type === 'area' || editingTarget.type === 'spot') {
 					deselectEntity();
 					return;
 				}
@@ -1027,6 +1185,37 @@
 					if (spotLayer) {
 						spotLayer.addTo(map);
 						shapeLayers.push(spotLayer);
+
+						const handleSpotClick = () => {
+							zoneClickedFlag = true;
+							setTimeout(() => zoneClickedFlag = false, 0);
+							// Deselect zone drag if active
+							if (editingZoneId) {
+								editingLayer?.pm.disableLayerDrag();
+								editingLayer?.off('pm:dragend');
+								editingLayer?.off('pm:dragstart');
+								const prevZone = venue.zones.find(z => z.id === editingZoneId);
+								if (prevZone && editingLayer) {
+									editingLayer.setStyle({
+										color: prevZone.style.stroke ?? '#cbd5e1',
+										weight: prevZone.style.strokeWidth ?? 1,
+										dashArray: ''
+									});
+								}
+								editingZoneId = '';
+								editingLayer = null;
+								editingOriginalShape = null;
+							}
+							// Toggle spot selection
+							if (editingTarget?.type === 'spot' && (editingTarget as any).spotId === spot.id) {
+								deselectEntity();
+							} else {
+								selectEntityForToolbar({ type: 'spot', zoneId: zone.id, areaId: area.id, spotId: spot.id }, spotLayer);
+							}
+						};
+
+						spotLayer.on('click', handleSpotClick);
+						makeTooltipClickable(spotLayer, handleSpotClick);
 					}
 				}
 			}
@@ -1174,6 +1363,12 @@
 					map.fitBounds(bbox);
 				});
 				geocoder.addTo(map);
+
+				// Move geocoder into fab-column so it aligns with other FAB buttons
+				const geocoderContainer = geocoder.getContainer();
+				if (geocoderContainer && fabColumnEl) {
+					fabColumnEl.insertBefore(geocoderContainer, fabColumnEl.firstChild);
+				}
 			}
 
 			venueGeoBounds = geoBounds;
@@ -1212,7 +1407,7 @@
 			}).addTo(map);
 		}
 
-		// Enable geoman controls
+		// Enable geoman without toolbar UI
 		map.pm.addControls({
 			position: 'bottomright',
 			drawCircleMarker: false,
@@ -1222,6 +1417,7 @@
 			cutPolygon: false,
 			rotateMode: false
 		});
+		map.pm.removeControls();
 
 		// Listen for shape creation
 		map.on('pm:create', (e: any) => {
@@ -1366,33 +1562,35 @@
 	<div class="map-area-wrapper">
 		<div class="map-area" bind:this={mapContainer}></div>
 
-		{#if !editMode && venueGeoBounds}
-			<button
-				class="map-fab home-fab"
-				onclick={(e) => { e.stopPropagation(); map?.flyToBounds(venueGeoBounds, { duration: 0.8 }); }}
-				title="Back to venue bounds"
-			>
-				<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-					<path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path>
-					<polyline points="9 22 9 12 15 12 15 22"></polyline>
-				</svg>
-			</button>
-		{/if}
+		<div class="fab-column" bind:this={fabColumnEl}>
+			{#if !editMode && venueGeoBounds}
+				<button
+					class="map-fab"
+					onclick={(e) => { e.stopPropagation(); map?.flyToBounds(venueGeoBounds, { duration: 0.8 }); }}
+					title="Back to venue bounds"
+				>
+					<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+						<path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path>
+						<polyline points="9 22 9 12 15 12 15 22"></polyline>
+					</svg>
+				</button>
+			{/if}
 
-		{#if editMode}
-			<button
-				class="map-fab"
-				class:active={editModeShowMap}
-				onclick={(e) => { e.stopPropagation(); toggleEditModeMap(); }}
-				title={editModeShowMap ? 'Hide map' : 'Show map'}
-			>
-				<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-					<polygon points="1 6 1 22 8 18 16 22 23 18 23 2 16 6 8 2 1 6"></polygon>
-					<line x1="8" y1="2" x2="8" y2="18"></line>
-					<line x1="16" y1="6" x2="16" y2="22"></line>
-				</svg>
-			</button>
-		{/if}
+			{#if editMode}
+				<button
+					class="map-fab"
+					class:active={editModeShowMap}
+					onclick={(e) => { e.stopPropagation(); toggleEditModeMap(); }}
+					title={editModeShowMap ? 'Hide map' : 'Show map'}
+				>
+					<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+						<polygon points="1 6 1 22 8 18 16 22 23 18 23 2 16 6 8 2 1 6"></polygon>
+						<line x1="8" y1="2" x2="8" y2="18"></line>
+						<line x1="16" y1="6" x2="16" y2="22"></line>
+					</svg>
+				</button>
+			{/if}
+		</div>
 
 		{#if !editMode && toolbarPosition && editingTarget && !isDragging}
 			{@const editingEntity = getEditingEntity()}
@@ -1405,7 +1603,7 @@
 					onmousedown={(e) => e.stopPropagation()}
 					onclick={(e) => e.stopPropagation()}
 				>
-					<span class="zt-title">{editingTarget.type === 'area' ? 'Area' : 'Zone'}: {editingEntity.name}</span>
+					<span class="zt-title">{editingTarget.type === 'spot' ? 'Spot' : editingTarget.type === 'area' ? 'Area' : 'Zone'}: {editingEntity.name}</span>
 					{#if deleteConfirming}
 						<span class="zt-confirm-text">Delete {editingEntity.name}?</span>
 						<button class="zt-btn zt-btn-danger" onclick={handleDelete}>Yes</button>
@@ -1587,6 +1785,31 @@
 					<button class="zt-btn" onclick={cancelRedraw}>Cancel Redraw</button>
 				{:else}
 					<button class="zt-btn" onclick={startRedraw}>Redraw Shape</button>
+				{/if}
+			</div>
+
+			<div class="sp-section sp-section-overlay">
+				<span class="sp-section-label">Image Overlay</span>
+				{#if overlayImageUrl}
+					<div class="sp-overlay-preview">
+						<img src={overlayImageUrl} alt="Overlay" class="sp-overlay-thumb" />
+						<button class="sp-overlay-remove" onclick={clearOverlay} title="Remove overlay">&#x2715;</button>
+					</div>
+					<div class="sp-style-row">
+						<span class="sp-overlay-label">Opacity</span>
+						<input type="range" class="zt-range sp-range-full" min="0" max="1" step="0.05" bind:value={overlayOpacity} oninput={updateOverlayOpacity} />
+						<span class="zt-range-val">{overlayOpacity.toFixed(2)}</span>
+					</div>
+					<div class="sp-style-row">
+						<span class="sp-overlay-label">Rotate</span>
+						<input type="range" class="zt-range sp-range-full" min="0" max="360" step="1" bind:value={overlayRotation} oninput={updateOverlayRotation} />
+						<span class="zt-range-val">{overlayRotation}&deg;</span>
+					</div>
+				{:else}
+					<label class="sp-overlay-upload">
+						<input type="file" accept="image/*" onchange={handleOverlayFile} hidden />
+						<span class="zt-btn sp-overlay-btn">Choose Image</span>
+					</label>
 				{/if}
 			</div>
 
@@ -2016,9 +2239,63 @@
 		width: 100%;
 	}
 
-	.side-panel.redraw-active .sp-section:not(.sp-section-redraw) {
+	.side-panel.redraw-active .sp-section:not(.sp-section-redraw):not(.sp-section-overlay) {
 		opacity: 0.35;
 		pointer-events: none;
+	}
+
+	.sp-overlay-preview {
+		position: relative;
+		border: 1px solid #334155;
+		border-radius: 8px;
+		overflow: hidden;
+	}
+
+	.sp-overlay-thumb {
+		width: 100%;
+		height: 80px;
+		object-fit: cover;
+		display: block;
+	}
+
+	.sp-overlay-remove {
+		position: absolute;
+		top: 4px;
+		right: 4px;
+		width: 24px;
+		height: 24px;
+		border-radius: 50%;
+		border: none;
+		background: rgba(0, 0, 0, 0.6);
+		color: #f1f5f9;
+		font-size: 12px;
+		cursor: pointer;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		line-height: 1;
+	}
+
+	.sp-overlay-remove:hover {
+		background: #ef4444;
+	}
+
+	.sp-overlay-label {
+		font-size: 12px;
+		font-weight: 500;
+		color: #94a3b8;
+		width: 50px;
+		flex-shrink: 0;
+	}
+
+	.sp-overlay-upload {
+		cursor: pointer;
+	}
+
+	.sp-overlay-btn {
+		display: block;
+		text-align: center;
+		width: 100%;
 	}
 
 	.sp-redraw-hint {
@@ -2031,11 +2308,18 @@
 		line-height: 1.4;
 	}
 
-	.map-fab {
+	.fab-column {
 		position: absolute;
 		bottom: 16px;
 		left: 16px;
 		z-index: 500;
+		display: flex;
+		flex-direction: column-reverse;
+		gap: 8px;
+		pointer-events: none;
+	}
+
+	.map-fab {
 		width: 44px;
 		height: 44px;
 		border-radius: 50%;
@@ -2048,16 +2332,13 @@
 		justify-content: center;
 		box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
 		transition: background 0.15s, color 0.15s, border-color 0.15s, box-shadow 0.15s;
+		pointer-events: auto;
 	}
 
 	.map-fab:hover {
 		background: #334155;
 		color: #f1f5f9;
 		border-color: #64748b;
-	}
-
-	.map-fab.home-fab {
-		bottom: 68px;
 	}
 
 	.map-fab.active {
@@ -2466,4 +2747,20 @@
 	:global(.leaflet-control-geocoder-alternatives a:hover) {
 		background: #334155 !important;
 	}
+
+	:global(.overlay-corner-handle) {
+		width: 14px !important;
+		height: 14px !important;
+		background: #facc15;
+		border: 2px solid #ffffff;
+		border-radius: 50%;
+		cursor: grab;
+		box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+	}
+
+	:global(.overlay-corner-handle:hover) {
+		background: #fbbf24;
+		transform: scale(1.3);
+	}
+
 </style>
