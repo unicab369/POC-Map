@@ -24,6 +24,8 @@ export interface Zone {
 	shape: ShapeDef;
 	style: ShapeStyle;
 	areas: Area[];
+	zoneType?: 'regular' | 'floor';
+	level?: number;
 }
 
 export interface Area {

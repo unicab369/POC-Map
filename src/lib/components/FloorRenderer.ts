@@ -1,5 +1,5 @@
 import Konva from 'konva';
-import type { Venue, Spot, POICategory, ShapeDef } from '$lib/types.ts';
+import type { Venue, Zone, Spot, POICategory, ShapeDef } from '$lib/types.ts';
 import { CATEGORY_COLORS } from '$lib/types.ts';
 import { renderShape } from '$lib/components/ShapeRenderer.ts';
 
@@ -156,6 +156,72 @@ export function renderVenue(
 			})
 		);
 	}
+
+	return group;
+}
+
+export function renderFloorZone(
+	zone: Zone,
+	venue: Venue,
+	onSpotClick: SpotClickHandler,
+	activeCategories: Set<POICategory>
+): Konva.Group {
+	const group = new Konva.Group({ name: `floor-${zone.id}` });
+
+	// Floor background rect (venue-sized)
+	group.add(
+		new Konva.Rect({
+			x: 0, y: 0,
+			width: venue.width, height: venue.height,
+			fill: zone.style.fill,
+			stroke: '#94a3b8', strokeWidth: 2,
+			cornerRadius: 8,
+			opacity: zone.style.opacity ?? 0.9
+		})
+	);
+
+	// Render each area within this floor
+	for (const area of zone.areas) {
+		const areaGroup = new Konva.Group({ name: `area-${area.id}` });
+
+		areaGroup.add(renderShape(area.shape, area.style));
+
+		const areaLabel = getLabelPosition(area.shape);
+		areaGroup.add(
+			new Konva.Text({
+				x: areaLabel.x, y: areaLabel.y,
+				text: area.name,
+				fontSize: 10,
+				fontFamily: 'Inter, sans-serif',
+				fontStyle: '500',
+				fill: '#64748b',
+				width: areaLabel.width,
+				wrap: 'word'
+			})
+		);
+
+		for (const spot of area.spots) {
+			const marker = createSpotMarker(spot, onSpotClick);
+			marker.visible(activeCategories.has(spot.category));
+			areaGroup.add(marker);
+		}
+
+		group.add(areaGroup);
+	}
+
+	// Floor label below
+	group.add(
+		new Konva.Text({
+			x: venue.width / 2, y: venue.height + 8,
+			text: zone.name,
+			fontSize: 13,
+			fontFamily: 'Inter, sans-serif',
+			fontStyle: '600',
+			fill: '#cbd5e1',
+			align: 'center',
+			offsetX: 60, width: 120
+		})
+	);
 
 	return group;
 }

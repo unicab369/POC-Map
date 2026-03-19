@@ -3,8 +3,12 @@
 	import Konva from 'konva';
 	import type { Venue, Spot } from '$lib/types.ts';
 	import { mapStore } from '$lib/mapStore.svelte.ts';
-	import { renderVenue, updateSpotVisibility } from '$lib/components/FloorRenderer.ts';
-	import { getFlatLayout, getIsometricLayout, animateToLayout } from '$lib/isometric.ts';
+	import { renderVenue, renderFloorZone, updateSpotVisibility } from '$lib/components/FloorRenderer.ts';
+	import {
+		getFlatLayout, getIsometricLayout, animateToLayout,
+		hasFloorZones, getFloorZones,
+		getMultiFloorFlatLayouts, getMultiFloorIsoLayouts
+	} from '$lib/isometric.ts';
 
 	let { venue }: { venue: Venue } = $props();
 
@@ -12,6 +16,8 @@
 	let stage: Konva.Stage;
 	let layer: Konva.Layer;
 	let venueGroup: Konva.Group;
+	let floorGroups: Konva.Group[] = [];
+	let isMultiFloor = false;
 
 	function handleSpotClick(spot: Spot, evt: Konva.KonvaEventObject<MouseEvent>) {
 		const markerNode = evt.currentTarget;
@@ -21,12 +27,21 @@
 	}
 
 	function applyLayout() {
-		if (!stage || !venueGroup) return;
-		const layout =
-			mapStore.viewMode === 'isometric'
-				? getIsometricLayout(venue, stage.width(), stage.height())
-				: getFlatLayout(venue, stage.width(), stage.height());
-		animateToLayout(venueGroup, layout);
+		if (!stage) return;
+
+		if (isMultiFloor && floorGroups.length > 0) {
+			const layouts =
+				mapStore.viewMode === 'isometric'
+					? getMultiFloorIsoLayouts(venue, floorGroups.length, stage.width(), stage.height())
+					: getMultiFloorFlatLayouts(venue, floorGroups.length, stage.width(), stage.height());
+			floorGroups.forEach((g, i) => animateToLayout(g, layouts[i]));
+		} else if (venueGroup) {
+			const layout =
+				mapStore.viewMode === 'isometric'
+					? getIsometricLayout(venue, stage.width(), stage.height())
+					: getFlatLayout(venue, stage.width(), stage.height());
+			animateToLayout(venueGroup, layout);
+		}
 		mapStore.clearSelection();
 	}
 
@@ -46,23 +61,49 @@
 		layer = new Konva.Layer();
 		stage.add(layer);
 
-		const wrapper = new Konva.Group({ name: `venuegroup-${venue.id}` });
-		const venueShape = renderVenue(venue, handleSpotClick, mapStore.activeCategories);
-		wrapper.add(venueShape);
+		isMultiFloor = hasFloorZones(venue);
 
-		layer.add(wrapper);
-		venueGroup = wrapper;
+		if (isMultiFloor) {
+			const floors = getFloorZones(venue);
+			floorGroups = [];
 
-		// Apply initial flat layout
-		const layout = getFlatLayout(venue, width, height);
-		wrapper.setAttrs({
-			x: layout.x,
-			y: layout.y,
-			scaleX: layout.scaleX,
-			scaleY: layout.scaleY,
-			skewX: layout.skewX,
-			rotation: layout.rotation
-		});
+			for (const floorZone of floors) {
+				const floorGroup = renderFloorZone(floorZone, venue, handleSpotClick, mapStore.activeCategories);
+				layer.add(floorGroup);
+				floorGroups.push(floorGroup);
+			}
+
+			// Apply initial flat layout
+			const layouts = getMultiFloorFlatLayouts(venue, floorGroups.length, width, height);
+			floorGroups.forEach((g, i) => {
+				g.setAttrs({
+					x: layouts[i].x,
+					y: layouts[i].y,
+					scaleX: layouts[i].scaleX,
+					scaleY: layouts[i].scaleY,
+					skewX: layouts[i].skewX,
+					rotation: layouts[i].rotation
+				});
+			});
+		} else {
+			const wrapper = new Konva.Group({ name: `venuegroup-${venue.id}` });
+			const venueShape = renderVenue(venue, handleSpotClick, mapStore.activeCategories);
+			wrapper.add(venueShape);
+
+			layer.add(wrapper);
+			venueGroup = wrapper;
+
+			// Apply initial flat layout
+			const layout = getFlatLayout(venue, width, height);
+			wrapper.setAttrs({
+				x: layout.x,
+				y: layout.y,
+				scaleX: layout.scaleX,
+				scaleY: layout.scaleY,
+				skewX: layout.skewX,
+				rotation: layout.rotation
+			});
+		}
 
 		layer.draw();
 
@@ -119,7 +160,7 @@
 	// React to view mode changes
 	$effect(() => {
 		const _mode = mapStore.viewMode;
-		if (stage && venueGroup) {
+		if (stage && (venueGroup || floorGroups.length > 0)) {
 			applyLayout();
 		}
 	});
