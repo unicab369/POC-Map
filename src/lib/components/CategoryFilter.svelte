@@ -35,7 +35,7 @@
 	.filter-label {
 		font-size: 12px;
 		font-weight: 600;
-		color: #94a3b8;
+		color: #64748b;
 		text-transform: uppercase;
 		letter-spacing: 0.05em;
 	}
@@ -51,9 +51,9 @@
 		align-items: center;
 		gap: 4px;
 		padding: 4px 10px;
-		border: 1.5px solid #e2e8f0;
+		border: 1.5px solid #334155;
 		border-radius: 20px;
-		background: white;
+		background: #1e293b;
 		cursor: pointer;
 		transition: all 0.2s;
 		font-family: 'Inter', sans-serif;
@@ -67,8 +67,8 @@
 
 	.chip.active {
 		border-color: var(--chip-color);
-		background: color-mix(in srgb, var(--chip-color) 10%, white);
-		color: #334155;
+		background: color-mix(in srgb, var(--chip-color) 15%, #1e293b);
+		color: #e2e8f0;
 	}
 
 	.chip-icon {

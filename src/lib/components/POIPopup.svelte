@@ -52,9 +52,9 @@
 	.popup {
 		position: absolute;
 		transform: translate(-50%, -100%);
-		background: white;
+		background: #1e293b;
 		border-radius: 12px;
-		box-shadow: 0 8px 32px rgba(0, 0, 0, 0.18);
+		box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
 		padding: 14px 16px;
 		min-width: 200px;
 		max-width: 280px;
@@ -81,8 +81,8 @@
 		transform: translateX(-50%) rotate(45deg);
 		width: 12px;
 		height: 12px;
-		background: white;
-		box-shadow: 3px 3px 6px rgba(0, 0, 0, 0.08);
+		background: #1e293b;
+		box-shadow: 3px 3px 6px rgba(0, 0, 0, 0.3);
 	}
 
 	.popup-header {
@@ -101,12 +101,12 @@
 	.popup-name {
 		font-weight: 600;
 		font-size: 15px;
-		color: #1e293b;
+		color: #f1f5f9;
 	}
 
 	.popup-desc {
 		font-size: 13px;
-		color: #64748b;
+		color: #94a3b8;
 		margin: 0 0 10px 0;
 		line-height: 1.4;
 	}

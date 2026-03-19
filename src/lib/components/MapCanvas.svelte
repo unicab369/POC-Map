@@ -150,7 +150,7 @@
 		height: 100%;
 		position: relative;
 		overflow: hidden;
-		background: #f8fafc;
+		background: #0f172a;
 		border-radius: 12px;
 	}
 </style>

@@ -13,7 +13,7 @@ export const airportVenue: Venue = {
 			width: 800,
 			height: 350,
 			color: '#eff6ff',
-			geoBounds: { sw: [33.9395, -118.4120], ne: [33.9435, -118.4000] },
+			geoBounds: { sw: [51.4680, -0.4590], ne: [51.4720, -0.4470] },
 			zones: [
 				{
 					id: 'baggage-claim',
@@ -142,7 +142,7 @@ export const airportVenue: Venue = {
 			width: 800,
 			height: 350,
 			color: '#f0fdf4',
-			geoBounds: { sw: [33.9395, -118.4120], ne: [33.9435, -118.4000] },
+			geoBounds: { sw: [51.4680, -0.4590], ne: [51.4720, -0.4470] },
 			zones: [
 				{
 					id: 'checkin-hall',

@@ -51,8 +51,8 @@
 		align-items: center;
 		gap: 16px;
 		padding: 10px 20px;
-		background: white;
-		border-bottom: 1px solid #e2e8f0;
+		background: #1e293b;
+		border-bottom: 1px solid #334155;
 		flex-shrink: 0;
 		flex-wrap: wrap;
 	}

@@ -150,7 +150,7 @@ export function renderFloor(
 				fontSize: 14,
 				fontFamily: 'Inter, sans-serif',
 				fontStyle: '600',
-				fill: '#64748b',
+				fill: '#cbd5e1',
 				align: 'center',
 				offsetX: 60, width: 120
 			})

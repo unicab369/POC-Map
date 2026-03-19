@@ -13,7 +13,7 @@ export const mallVenue: Venue = {
 			width: 700,
 			height: 400,
 			color: '#f5f5f4',
-			geoBounds: { sw: [44.8530, -93.2450], ne: [44.8565, -93.2380] },
+			geoBounds: { sw: [25.1950, 55.2760], ne: [25.1985, 55.2830] },
 			zones: [
 				{
 					id: 'main-entrance',
@@ -160,7 +160,7 @@ export const mallVenue: Venue = {
 			width: 700,
 			height: 400,
 			color: '#fafaf9',
-			geoBounds: { sw: [44.8530, -93.2450], ne: [44.8565, -93.2380] },
+			geoBounds: { sw: [25.1950, 55.2760], ne: [25.1985, 55.2830] },
 			zones: [
 				{
 					id: 'cinema-complex',

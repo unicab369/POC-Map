@@ -251,8 +251,11 @@
 				zoomDelta: 1,
 				wheelPxPerZoomLevel: 20,
 				wheelDebounceTime: 0,
-				zoomAnimation: false
+				zoomAnimation: false,
+				zoomControl: false
 			});
+
+			L.control.zoom({ position: 'bottomright' }).addTo(map);
 
 			// Add OpenStreetMap tiles
 			L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -343,7 +346,7 @@
 
 		// Enable geoman controls
 		map.pm.addControls({
-			position: 'topleft',
+			position: 'bottomright',
 			drawCircleMarker: false,
 			drawMarker: false,
 			drawPolyline: false,
@@ -388,7 +391,7 @@
 			renderExistingShapes();
 			// Re-enable geoman controls
 			map.pm.addControls({
-				position: 'topleft',
+				position: 'bottomright',
 				drawCircleMarker: false,
 				drawMarker: false,
 				drawPolyline: false,
@@ -444,6 +447,7 @@
 
 	$effect(() => {
 		const _fi = floorIndex;
+		const _vid = venue.id;
 		if (map) {
 			overlay?.destroy();
 			overlay = null;
@@ -455,56 +459,55 @@
 
 <div class="editor-wrapper">
 	<div class="editor-toolbar">
-		<span class="venue-name">{venue.name}</span>
-
-		<div class="toolbar-sep"></div>
-
-		<div class="toolbar-group">
-			{#each venue.floors as floor, i}
-				<button class="tb-btn" class:active={floorIndex === i} onclick={() => floorIndex = i}>
-					{floor.name}
-				</button>
-			{/each}
-		</div>
-
-		<div class="toolbar-sep"></div>
-
-		<div class="toolbar-group">
-			<button class="tb-btn" class:active={drawLevel === 'zone'} onclick={() => drawLevel = 'zone'}>Zone</button>
-			<button class="tb-btn" class:active={drawLevel === 'area'} onclick={() => drawLevel = 'area'}>Area</button>
-			<button class="tb-btn" class:active={drawLevel === 'spot'} onclick={() => drawLevel = 'spot'}>Spot</button>
-		</div>
-
-		{#if drawLevel === 'area' || drawLevel === 'spot'}
-			<select class="tb-select" bind:value={selectedZoneId}>
-				<option value="">Zone...</option>
-				{#each currentFloor().zones as zone}
-					<option value={zone.id}>{zone.name}</option>
+		<div class="toolbar-row">
+			<span class="venue-name">{venue.name}</span>
+			<div class="toolbar-sep"></div>
+			<div class="toolbar-group">
+				{#each venue.floors as floor, i}
+					<button class="tb-btn" class:active={floorIndex === i} onclick={() => floorIndex = i}>
+						{floor.name}
+					</button>
 				{/each}
-			</select>
-		{/if}
-
-		{#if drawLevel === 'spot' && selectedZoneId}
-			{@const parentZone = currentFloor().zones.find(z => z.id === selectedZoneId)}
-			{#if parentZone}
-				<select class="tb-select" bind:value={selectedAreaId}>
-					<option value="">Area...</option>
-					{#each parentZone.areas as area}
-						<option value={area.id}>{area.name}</option>
+			</div>
+			<div class="toolbar-spacer"></div>
+			<button class="tb-btn preview-btn" class:active={previewMode} onclick={togglePreview}>
+				{previewMode ? 'Edit' : 'Preview'}
+			</button>
+			<button class="save-btn" onclick={handleSave}>Save</button>
+			{#if onreset}
+				<button class="reset-btn" onclick={onreset}>Reset</button>
+			{/if}
+		</div>
+		<div class="toolbar-row">
+			<span class="toolbar-label">Draw:</span>
+			<div class="toolbar-group">
+				<button class="tb-btn" class:active={drawLevel === 'zone'} onclick={() => drawLevel = 'zone'}>Zone</button>
+				<button class="tb-btn" class:active={drawLevel === 'area'} onclick={() => drawLevel = 'area'}>Area</button>
+				<button class="tb-btn" class:active={drawLevel === 'spot'} onclick={() => drawLevel = 'spot'}>Spot</button>
+			</div>
+			{#if drawLevel === 'area' || drawLevel === 'spot'}
+				<div class="toolbar-sep"></div>
+				<span class="toolbar-label">in Zone:</span>
+				<select class="tb-select" bind:value={selectedZoneId}>
+					<option value="">-- select --</option>
+					{#each currentFloor().zones as zone}
+						<option value={zone.id}>{zone.name}</option>
 					{/each}
 				</select>
 			{/if}
-		{/if}
-
-		<div class="toolbar-spacer"></div>
-
-		<button class="tb-btn preview-btn" class:active={previewMode} onclick={togglePreview}>
-			{previewMode ? 'Edit' : 'Preview'}
-		</button>
-		<button class="save-btn" onclick={handleSave}>Save</button>
-		{#if onreset}
-			<button class="reset-btn" onclick={onreset}>Reset</button>
-		{/if}
+			{#if drawLevel === 'spot' && selectedZoneId}
+				{@const parentZone = currentFloor().zones.find(z => z.id === selectedZoneId)}
+				{#if parentZone}
+					<span class="toolbar-label">in Area:</span>
+					<select class="tb-select" bind:value={selectedAreaId}>
+						<option value="">-- select --</option>
+						{#each parentZone.areas as area}
+							<option value={area.id}>{area.name}</option>
+						{/each}
+					</select>
+				{/if}
+			{/if}
+		</div>
 	</div>
 
 	<div class="map-area" bind:this={mapContainer}></div>
@@ -550,19 +553,35 @@
 
 	.editor-toolbar {
 		display: flex;
+		flex-direction: column;
+		background: #1e293b;
+		border-bottom: 1px solid #334155;
+		flex-shrink: 0;
+	}
+
+	.toolbar-row {
+		display: flex;
 		align-items: center;
 		gap: 8px;
-		padding: 6px 12px;
-		background: white;
-		border-bottom: 1px solid #e2e8f0;
-		flex-shrink: 0;
-		flex-wrap: wrap;
+		padding: 5px 12px;
+	}
+
+	.toolbar-row:first-child {
+		border-bottom: 1px solid #334155;
 	}
 
 	.venue-name {
 		font-size: 14px;
 		font-weight: 700;
-		color: #1e293b;
+		color: #f1f5f9;
+		white-space: nowrap;
+	}
+
+	.toolbar-label {
+		font-size: 11px;
+		font-weight: 600;
+		color: #64748b;
+		text-transform: uppercase;
 		white-space: nowrap;
 	}
 
@@ -573,8 +592,8 @@
 
 	.toolbar-sep {
 		width: 1px;
-		height: 24px;
-		background: #e2e8f0;
+		height: 20px;
+		background: #334155;
 	}
 
 	.toolbar-spacer {
@@ -583,38 +602,39 @@
 
 	.tb-btn {
 		padding: 4px 10px;
-		border: 1.5px solid #e2e8f0;
+		border: 1.5px solid #334155;
 		border-radius: 6px;
-		background: white;
+		background: #1e293b;
 		font-size: 12px;
 		font-weight: 500;
 		cursor: pointer;
 		font-family: 'Inter', sans-serif;
-		color: #64748b;
+		color: #94a3b8;
 		transition: all 0.15s;
 		white-space: nowrap;
 	}
 
 	.tb-btn.active {
-		border-color: #6366f1;
-		background: #eef2ff;
-		color: #4f46e5;
+		border-color: #818cf8;
+		background: #312e81;
+		color: #818cf8;
 	}
 
 	.tb-select {
 		padding: 4px 8px;
-		border: 1px solid #e2e8f0;
+		border: 1px solid #334155;
 		border-radius: 6px;
 		font-size: 12px;
 		font-family: 'Inter', sans-serif;
-		background: white;
+		background: #0f172a;
+		color: #e2e8f0;
 		max-width: 160px;
 	}
 
 	.preview-btn.active {
 		border-color: #10b981;
-		background: #ecfdf5;
-		color: #059669;
+		background: #064e3b;
+		color: #34d399;
 	}
 
 	.save-btn {
@@ -637,7 +657,7 @@
 		padding: 4px 10px;
 		border: 1px solid #fca5a5;
 		border-radius: 6px;
-		background: white;
+		background: #1e293b;
 		color: #ef4444;
 		font-size: 12px;
 		font-weight: 500;
@@ -646,14 +666,14 @@
 	}
 
 	.reset-btn:hover {
-		background: #fef2f2;
+		background: #451a1a;
 	}
 
 	.map-area {
 		flex: 1;
 		min-height: 0;
 		min-width: 0;
-		background: #f8fafc;
+		background: #0f172a;
 	}
 
 	.dialog-overlay {
@@ -667,11 +687,11 @@
 	}
 
 	.dialog {
-		background: white;
+		background: #1e293b;
 		border-radius: 12px;
 		padding: 24px;
 		min-width: 320px;
-		box-shadow: 0 20px 60px rgba(0, 0, 0, 0.2);
+		box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
 	}
 
 	.dialog h3 {
@@ -679,6 +699,7 @@
 		font-weight: 700;
 		margin-bottom: 16px;
 		text-transform: capitalize;
+		color: #f1f5f9;
 	}
 
 	.dialog label {
@@ -688,15 +709,17 @@
 		margin-bottom: 12px;
 		font-size: 13px;
 		font-weight: 500;
-		color: #64748b;
+		color: #94a3b8;
 	}
 
 	.dialog input, .dialog select, .dialog textarea {
 		padding: 8px 10px;
-		border: 1px solid #e2e8f0;
+		border: 1px solid #334155;
 		border-radius: 8px;
 		font-size: 14px;
 		font-family: 'Inter', sans-serif;
+		background: #0f172a;
+		color: #e2e8f0;
 	}
 
 	.dialog textarea {
@@ -712,9 +735,10 @@
 
 	.cancel-btn {
 		padding: 8px 16px;
-		border: 1px solid #e2e8f0;
+		border: 1px solid #334155;
 		border-radius: 8px;
-		background: white;
+		background: #1e293b;
+		color: #e2e8f0;
 		font-size: 13px;
 		cursor: pointer;
 		font-family: 'Inter', sans-serif;

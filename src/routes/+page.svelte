@@ -59,14 +59,14 @@
 	.hero h1 {
 		font-size: 36px;
 		font-weight: 800;
-		color: #0f172a;
+		color: #f8fafc;
 		letter-spacing: -0.03em;
 		margin-bottom: 8px;
 	}
 
 	.hero p {
 		font-size: 16px;
-		color: #64748b;
+		color: #94a3b8;
 		max-width: 480px;
 		margin: 0 auto;
 	}

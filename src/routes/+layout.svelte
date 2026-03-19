@@ -72,8 +72,8 @@
 
 	:global(body) {
 		font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-		background: #f1f5f9;
-		color: #1e293b;
+		background: #0f172a;
+		color: #e2e8f0;
 		overflow: hidden;
 		height: 100vh;
 	}
@@ -93,8 +93,8 @@
 	.side-panel {
 		width: 200px;
 		flex-shrink: 0;
-		background: white;
-		border-left: 1px solid #e2e8f0;
+		background: #1e293b;
+		border-left: 1px solid #334155;
 		padding: 16px;
 		display: flex;
 		flex-direction: column;
@@ -107,7 +107,7 @@
 		align-items: center;
 		gap: 8px;
 		text-decoration: none;
-		color: #1e293b;
+		color: #f1f5f9;
 	}
 
 	.brand-icon {
@@ -129,7 +129,7 @@
 	.nav-section-label {
 		font-size: 11px;
 		font-weight: 600;
-		color: #94a3b8;
+		color: #64748b;
 		text-transform: uppercase;
 		letter-spacing: 0.05em;
 	}
@@ -146,7 +146,7 @@
 		gap: 8px;
 		padding: 6px 10px;
 		text-decoration: none;
-		color: #64748b;
+		color: #94a3b8;
 		font-size: 13px;
 		font-weight: 500;
 		border-radius: 6px;
@@ -154,13 +154,13 @@
 	}
 
 	.nav-link:hover {
-		background: #f1f5f9;
-		color: #334155;
+		background: #334155;
+		color: #e2e8f0;
 	}
 
 	.nav-link.active {
-		background: #eef2ff;
-		color: #4f46e5;
+		background: #312e81;
+		color: #818cf8;
 	}
 
 	.nav-icon {
@@ -169,7 +169,7 @@
 
 	.nav-divider {
 		height: 1px;
-		background: #e2e8f0;
+		background: #334155;
 	}
 
 	@media (max-width: 640px) {

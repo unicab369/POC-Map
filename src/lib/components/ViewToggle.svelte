@@ -29,7 +29,7 @@
 	.view-toggle {
 		display: flex;
 		gap: 2px;
-		background: #f1f5f9;
+		background: #0f172a;
 		border-radius: 10px;
 		padding: 3px;
 	}
@@ -42,7 +42,7 @@
 		border: none;
 		border-radius: 8px;
 		background: transparent;
-		color: #64748b;
+		color: #94a3b8;
 		font-size: 13px;
 		font-weight: 500;
 		cursor: pointer;
@@ -51,12 +51,12 @@
 	}
 
 	button:hover {
-		color: #334155;
+		color: #e2e8f0;
 	}
 
 	button.active {
-		background: white;
-		color: #1e293b;
-		box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+		background: #334155;
+		color: #f1f5f9;
+		box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
 	}
 </style>

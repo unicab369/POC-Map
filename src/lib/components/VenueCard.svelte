@@ -48,10 +48,10 @@
 	.venue-card {
 		display: flex;
 		flex-direction: column;
-		background: white;
+		background: #1e293b;
 		border-radius: 16px;
 		overflow: hidden;
-		box-shadow: 0 4px 24px rgba(0, 0, 0, 0.08);
+		box-shadow: 0 4px 24px rgba(0, 0, 0, 0.3);
 		text-decoration: none;
 		color: inherit;
 		transition: transform 0.25s ease, box-shadow 0.25s ease;
@@ -59,7 +59,7 @@
 
 	.venue-card:hover {
 		transform: translateY(-4px);
-		box-shadow: 0 12px 40px rgba(0, 0, 0, 0.15);
+		box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
 	}
 
 	.card-hero {
@@ -82,13 +82,13 @@
 	.card-body h2 {
 		font-size: 20px;
 		font-weight: 700;
-		color: #1e293b;
+		color: #f1f5f9;
 		margin: 0 0 6px 0;
 	}
 
 	.card-body p {
 		font-size: 14px;
-		color: #64748b;
+		color: #94a3b8;
 		margin: 0 0 12px 0;
 		line-height: 1.4;
 	}
@@ -98,14 +98,14 @@
 		align-items: center;
 		gap: 8px;
 		font-size: 12px;
-		color: #94a3b8;
+		color: #64748b;
 	}
 
 	.dot {
 		width: 3px;
 		height: 3px;
 		border-radius: 50%;
-		background: #cbd5e1;
+		background: #475569;
 	}
 
 	.card-footer {
@@ -113,9 +113,9 @@
 		align-items: center;
 		justify-content: space-between;
 		padding: 14px 20px;
-		border-top: 1px solid #f1f5f9;
+		border-top: 1px solid #334155;
 		font-size: 14px;
 		font-weight: 600;
-		color: #6366f1;
+		color: #818cf8;
 	}
 </style>
