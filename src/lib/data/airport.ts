@@ -2,9 +2,9 @@ import type { Venue } from '$lib/types.ts';
 
 export const airportVenue: Venue = {
 	id: 'airport',
-	name: 'Metro International Airport',
+	name: 'Chicago O\'Hare International Airport',
 	type: 'airport',
-	description: 'International airport with two terminals',
+	description: 'Major international hub serving the Chicago metropolitan area',
 	floors: [
 		{
 			id: 'airport-arrivals',
@@ -13,7 +13,7 @@ export const airportVenue: Venue = {
 			width: 800,
 			height: 350,
 			color: '#eff6ff',
-			geoBounds: { sw: [51.4680, -0.4590], ne: [51.4720, -0.4470] },
+			geoBounds: { sw: [41.9766, -87.9108], ne: [41.9806, -87.8988] },
 			zones: [
 				{
 					id: 'baggage-claim',
@@ -142,7 +142,7 @@ export const airportVenue: Venue = {
 			width: 800,
 			height: 350,
 			color: '#f0fdf4',
-			geoBounds: { sw: [51.4680, -0.4590], ne: [51.4720, -0.4470] },
+			geoBounds: { sw: [41.9766, -87.9108], ne: [41.9806, -87.8988] },
 			zones: [
 				{
 					id: 'checkin-hall',

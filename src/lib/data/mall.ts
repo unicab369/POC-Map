@@ -2,9 +2,9 @@ import type { Venue } from '$lib/types.ts';
 
 export const mallVenue: Venue = {
 	id: 'mall',
-	name: 'Grand Central Mall',
+	name: 'The Dubai Mall',
 	type: 'mall',
-	description: 'Premium shopping destination with dining and entertainment',
+	description: 'One of the world\'s largest shopping and entertainment destinations',
 	floors: [
 		{
 			id: 'mall-f1',
@@ -13,7 +13,7 @@ export const mallVenue: Venue = {
 			width: 700,
 			height: 400,
 			color: '#f5f5f4',
-			geoBounds: { sw: [25.1950, 55.2760], ne: [25.1985, 55.2830] },
+			geoBounds: { sw: [25.1957, 55.2773], ne: [25.1992, 55.2823] },
 			zones: [
 				{
 					id: 'main-entrance',
@@ -160,7 +160,7 @@ export const mallVenue: Venue = {
 			width: 700,
 			height: 400,
 			color: '#fafaf9',
-			geoBounds: { sw: [25.1950, 55.2760], ne: [25.1985, 55.2830] },
+			geoBounds: { sw: [25.1957, 55.2773], ne: [25.1992, 55.2823] },
 			zones: [
 				{
 					id: 'cinema-complex',

@@ -147,7 +147,7 @@
 		padding: 6px 10px;
 		text-decoration: none;
 		color: #94a3b8;
-		font-size: 13px;
+		font-size: 15px;
 		font-weight: 500;
 		border-radius: 6px;
 		transition: all 0.15s;
