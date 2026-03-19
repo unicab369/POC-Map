@@ -15,7 +15,6 @@
 
 	let venueId = $derived($page.params.venue ?? 'park');
 	let venue = $state<Venue>(getVenue($page.params.venue ?? 'park'));
-	let floorIndex = $state(0);
 
 	function getVenue(id: string): Venue {
 		const saved = loadVenue(id);
@@ -27,7 +26,6 @@
 	$effect(() => {
 		const id = $page.params.venue ?? 'park';
 		venue = getVenue(id);
-		floorIndex = 0;
 	});
 </script>
 
@@ -36,7 +34,7 @@
 </svelte:head>
 
 <div class="editor-page">
-	<MapEditor bind:venue bind:floorIndex />
+	<MapEditor bind:venue />
 </div>
 
 <style>

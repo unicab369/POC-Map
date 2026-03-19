@@ -1,15 +1,13 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import type { Venue, Floor, Zone, Area, Spot, ShapeDef, ShapeStyle, POICategory } from '$lib/types.ts';
+	import type { Venue, Zone, Area, Spot, ShapeDef, ShapeStyle, POICategory } from '$lib/types.ts';
 	import { CATEGORY_COLORS } from '$lib/types.ts';
 	import { createGeoConverter, type GeoConverter } from '$lib/geoConvert.ts';
 
 	let {
 		venue = $bindable(),
-		floorIndex = $bindable(0),
 	}: {
 		venue: Venue;
-		floorIndex?: number;
 	} = $props();
 
 	let mapContainer: HTMLDivElement;
@@ -52,14 +50,9 @@
 
 	const categories: POICategory[] = ['food', 'attraction', 'shop', 'restroom', 'info', 'gate', 'security'];
 
-	function currentFloor(): Floor {
-		return venue.floors[floorIndex];
-	}
-
 	function getGeoConverter(): GeoConverter | undefined {
-		const floor = currentFloor();
-		if (!floor.geoBounds) return undefined;
-		return createGeoConverter(floor.geoBounds, floor.width, floor.height);
+		if (!venue.geoBounds) return undefined;
+		return createGeoConverter(venue.geoBounds, venue.width, venue.height);
 	}
 
 	function layerToShapeDef(layer: any): ShapeDef {
@@ -127,13 +120,13 @@
 	}
 
 	function getEditingZone(): Zone | undefined {
-		return currentFloor().zones.find(z => z.id === editingZoneId);
+		return venue.zones.find(z => z.id === editingZoneId);
 	}
 
 	/** Returns the zone or area entity currently selected by the toolbar */
 	function getEditingEntity(): (Zone | Area) | undefined {
 		if (!editingTarget) return undefined;
-		const zone = currentFloor().zones.find(z => z.id === editingTarget!.zoneId);
+		const zone = venue.zones.find(z => z.id === editingTarget!.zoneId);
 		if (!zone) return undefined;
 		if (editingTarget.type === 'zone') return zone;
 		return zone.areas.find(a => a.id === editingTarget!.areaId);
@@ -274,7 +267,7 @@
 	function handleDuplicate() {
 		if (!editingTarget) return;
 		if (editingTarget.type === 'zone') {
-			const zone = currentFloor().zones.find(z => z.id === editingTarget!.zoneId);
+			const zone = venue.zones.find(z => z.id === editingTarget!.zoneId);
 			if (!zone) return;
 			const cloned: Zone = JSON.parse(JSON.stringify(zone));
 			cloned.id = generateId('zone');
@@ -288,9 +281,9 @@
 					spot.shape = applyDelta(spot.shape, 20, 20);
 				}
 			}
-			currentFloor().zones = [...currentFloor().zones, cloned];
+			venue.zones = [...venue.zones, cloned];
 		} else {
-			const zone = currentFloor().zones.find(z => z.id === editingTarget!.zoneId);
+			const zone = venue.zones.find(z => z.id === editingTarget!.zoneId);
 			if (!zone) return;
 			const area = zone.areas.find(a => a.id === editingTarget!.areaId);
 			if (!area) return;
@@ -313,10 +306,9 @@
 	function handleDelete() {
 		if (!editingTarget) return;
 		if (editingTarget.type === 'zone') {
-			const floor = currentFloor();
-			floor.zones = floor.zones.filter(z => z.id !== editingTarget!.zoneId);
+			venue.zones = venue.zones.filter(z => z.id !== editingTarget!.zoneId);
 		} else {
-			const zone = currentFloor().zones.find(z => z.id === editingTarget!.zoneId);
+			const zone = venue.zones.find(z => z.id === editingTarget!.zoneId);
 			if (zone) {
 				zone.areas = zone.areas.filter(a => a.id !== editingTarget!.areaId);
 			}
@@ -362,7 +354,7 @@
 			editingLayer.pm.disableLayerDrag();
 			editingLayer.off('pm:dragend');
 			editingLayer.off('pm:dragstart');
-			const prevZone = currentFloor().zones.find(z => z.id === editingZoneId);
+			const prevZone = venue.zones.find(z => z.id === editingZoneId);
 			if (prevZone) {
 				editingLayer.setStyle({
 					color: prevZone.style.stroke ?? '#cbd5e1',
@@ -374,7 +366,7 @@
 
 		editingZoneId = zoneId;
 		editingLayer = layer;
-		const zone = currentFloor().zones.find(z => z.id === zoneId);
+		const zone = venue.zones.find(z => z.id === zoneId);
 		if (zone) {
 			editingOriginalShape = zone.shape.type === 'polygon'
 				? { ...zone.shape, points: [...zone.shape.points] }
@@ -396,7 +388,7 @@
 			editingLayer.pm.disableLayerDrag();
 			editingLayer.off('pm:dragend');
 			editingLayer.off('pm:dragstart');
-			const prevZone = currentFloor().zones.find(z => z.id === editingZoneId);
+			const prevZone = venue.zones.find(z => z.id === editingZoneId);
 			if (prevZone) {
 				editingLayer.setStyle({
 					color: prevZone.style.stroke ?? '#cbd5e1',
@@ -421,8 +413,7 @@
 
 		const delta = computeShapeDelta(editingOriginalShape, newShape);
 
-		const floor = currentFloor();
-		const zone = floor.zones.find(z => z.id === editingZoneId);
+		const zone = venue.zones.find(z => z.id === editingZoneId);
 		if (zone) {
 			zone.shape = applyDelta(zone.shape, delta.dx, delta.dy);
 			for (const area of zone.areas) {
@@ -469,8 +460,6 @@
 	}
 
 	function addShapeToVenue(shapeDef: ShapeDef, name: string, category: POICategory, description: string) {
-		const floor = currentFloor();
-
 		if (drawLevel === 'zone') {
 			const zone: Zone = {
 				id: generateId('zone'),
@@ -480,9 +469,9 @@
 				style: defaultStyle('zone', category),
 				areas: []
 			};
-			floor.zones = [...floor.zones, zone];
+			venue.zones = [...venue.zones, zone];
 		} else if (drawLevel === 'area') {
-			const zone = floor.zones.find(z => z.id === selectedZoneId);
+			const zone = venue.zones.find(z => z.id === selectedZoneId);
 			if (!zone) return;
 			const area: Area = {
 				id: generateId('area'),
@@ -494,7 +483,7 @@
 			};
 			zone.areas = [...zone.areas, area];
 		} else {
-			const zone = floor.zones.find(z => z.id === selectedZoneId);
+			const zone = venue.zones.find(z => z.id === selectedZoneId);
 			if (!zone) return;
 			const area = zone.areas.find(a => a.id === selectedAreaId);
 			if (!area) return;
@@ -531,8 +520,6 @@
 		}
 		shapeLayers = [];
 
-		const floor = currentFloor();
-
 		// Helper: make a layer's tooltip clickable, triggering the same handler as the layer
 		function makeTooltipClickable(layer: any, handler: () => void) {
 			const L = (window as any).L;
@@ -549,7 +536,7 @@
 			});
 		}
 
-		for (const zone of floor.zones) {
+		for (const zone of venue.zones) {
 			const zoneLayer = shapeDefToLayer(zone.shape, zone.style, zone.name, 'zone', converter);
 			if (zoneLayer) {
 				zoneLayer.addTo(map);
@@ -583,7 +570,7 @@
 							editingLayer?.pm.disableLayerDrag();
 							editingLayer?.off('pm:dragend');
 							editingLayer?.off('pm:dragstart');
-							const prevZone = currentFloor().zones.find(z => z.id === editingZoneId);
+							const prevZone = venue.zones.find(z => z.id === editingZoneId);
 							if (prevZone && editingLayer) {
 								editingLayer.setStyle({
 									color: prevZone.style.stroke ?? '#cbd5e1',
@@ -708,40 +695,39 @@
 
 	function initMap() {
 		const L = (window as any).L;
-		const floor = currentFloor();
 		const converter = getGeoConverter();
 
-		if (converter && floor.geoBounds) {
+		if (converter && venue.geoBounds) {
 			// GPS mode: standard Leaflet CRS with OSM tiles
 			map = L.map(mapContainer, {
 				minZoom: 2,
-				maxZoom: 20,
-				zoomSnap: 0,
+				maxZoom: 19,
+				zoomSnap: 0.5,
 				zoomDelta: 1,
-				wheelPxPerZoomLevel: 20,
-				wheelDebounceTime: 0,
+				wheelDebounceTime: 40,
 				zoomAnimation: false,
 				zoomControl: false
 			});
 
 			L.control.zoom({ position: 'bottomright' }).addTo(map);
 
-			// Add OpenStreetMap tiles
-			L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-				attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-				maxZoom: 20
+			// Add map tiles (CartoDB Positron — fast CDN-backed tiles)
+			L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+				attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a> &copy; <a href="https://carto.com/">CARTO</a>',
+				subdomains: 'abcd',
+				maxZoom: 19
 			}).addTo(map);
 
 			const geoBounds = L.latLngBounds(
-				[floor.geoBounds.sw[0], floor.geoBounds.sw[1]],
-				[floor.geoBounds.ne[0], floor.geoBounds.ne[1]]
+				[venue.geoBounds.sw[0], venue.geoBounds.sw[1]],
+				[venue.geoBounds.ne[0], venue.geoBounds.ne[1]]
 			);
 
 			// Semi-transparent floor background rectangle
 			floorBackgroundLayer = L.rectangle(geoBounds, {
 				color: '#94a3b8',
 				weight: 2,
-				fillColor: floor.color,
+				fillColor: venue.color,
 				fillOpacity: 0.3
 			}).addTo(map);
 
@@ -797,7 +783,7 @@
 				zoomSnap: 0.25
 			});
 
-			const bounds = [[0, 0], [floor.height, floor.width]];
+			const bounds = [[0, 0], [venue.height, venue.width]];
 
 			setTimeout(() => {
 				map.invalidateSize();
@@ -808,7 +794,7 @@
 			floorBackgroundLayer = L.rectangle(bounds, {
 				color: '#94a3b8',
 				weight: 2,
-				fillColor: floor.color,
+				fillColor: venue.color,
 				fillOpacity: 1
 			}).addTo(map);
 		}
@@ -893,7 +879,6 @@
 	});
 
 	$effect(() => {
-		const _fi = floorIndex;
 		const _vid = venue.id;
 		if (map) {
 			map.remove();
@@ -908,20 +893,12 @@
 	<div class="editor-toolbar">
 		<div class="toolbar-row">
 			<span class="venue-name">{venue.name}</span>
-			<div class="toolbar-sep"></div>
-			<div class="toolbar-group">
-				{#each venue.floors as floor, i}
-					<button class="tb-btn" class:active={floorIndex === i} onclick={() => floorIndex = i}>
-						{floor.name}
-					</button>
-				{/each}
-			</div>
 			<div class="toolbar-spacer"></div>
 		</div>
 		{#if editingZoneId}
 		<div class="toolbar-row">
 				<span class="editing-badge">
-					Moving: {currentFloor().zones.find(z => z.id === editingZoneId)?.name ?? ''}
+					Moving: {venue.zones.find(z => z.id === editingZoneId)?.name ?? ''}
 				</span>
 		</div>
 		{/if}
@@ -1097,58 +1074,8 @@
 		white-space: nowrap;
 	}
 
-	.toolbar-label {
-		font-size: 13px;
-		font-weight: 600;
-		color: #64748b;
-		text-transform: uppercase;
-		white-space: nowrap;
-	}
-
-	.toolbar-group {
-		display: flex;
-		gap: 4px;
-	}
-
-	.toolbar-sep {
-		width: 1px;
-		height: 24px;
-		background: #334155;
-	}
-
 	.toolbar-spacer {
 		flex: 1;
-	}
-
-	.tb-btn {
-		padding: 6px 14px;
-		border: 1.5px solid #334155;
-		border-radius: 6px;
-		background: #1e293b;
-		font-size: 14px;
-		font-weight: 500;
-		cursor: pointer;
-		font-family: 'Inter', sans-serif;
-		color: #94a3b8;
-		transition: all 0.15s;
-		white-space: nowrap;
-	}
-
-	.tb-btn.active {
-		border-color: #818cf8;
-		background: #312e81;
-		color: #818cf8;
-	}
-
-	.tb-select {
-		padding: 6px 10px;
-		border: 1px solid #334155;
-		border-radius: 6px;
-		font-size: 14px;
-		font-family: 'Inter', sans-serif;
-		background: #0f172a;
-		color: #e2e8f0;
-		max-width: 180px;
 	}
 
 	.map-area-wrapper {

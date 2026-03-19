@@ -3,7 +3,7 @@
 	import Konva from 'konva';
 	import type { Venue, Spot } from '$lib/types.ts';
 	import { mapStore } from '$lib/mapStore.svelte.ts';
-	import { renderFloor, updateSpotVisibility } from '$lib/components/FloorRenderer.ts';
+	import { renderVenue, updateSpotVisibility } from '$lib/components/FloorRenderer.ts';
 	import { getFlatLayout, getIsometricLayout, animateToLayout } from '$lib/isometric.ts';
 
 	let { venue }: { venue: Venue } = $props();
@@ -11,7 +11,7 @@
 	let containerEl: HTMLDivElement;
 	let stage: Konva.Stage;
 	let layer: Konva.Layer;
-	let floorGroups: Konva.Group[] = [];
+	let venueGroup: Konva.Group;
 
 	function handleSpotClick(spot: Spot, evt: Konva.KonvaEventObject<MouseEvent>) {
 		const markerNode = evt.currentTarget;
@@ -21,12 +21,12 @@
 	}
 
 	function applyLayout() {
-		if (!stage || floorGroups.length === 0) return;
-		const layouts =
+		if (!stage || !venueGroup) return;
+		const layout =
 			mapStore.viewMode === 'isometric'
-				? getIsometricLayout(venue.floors, stage.width(), stage.height())
-				: getFlatLayout(venue.floors, stage.width(), stage.height());
-		animateToLayout(floorGroups, layouts);
+				? getIsometricLayout(venue, stage.width(), stage.height())
+				: getFlatLayout(venue, stage.width(), stage.height());
+		animateToLayout(venueGroup, layout);
 		mapStore.clearSelection();
 	}
 
@@ -46,29 +46,22 @@
 		layer = new Konva.Layer();
 		stage.add(layer);
 
-		floorGroups = [];
+		const wrapper = new Konva.Group({ name: `venuegroup-${venue.id}` });
+		const venueShape = renderVenue(venue, handleSpotClick, mapStore.activeCategories);
+		wrapper.add(venueShape);
 
-		for (const floor of venue.floors) {
-			const floorGroup = new Konva.Group({ name: `floorgroup-${floor.id}` });
-			const floorShape = renderFloor(floor, handleSpotClick, mapStore.activeCategories);
-			floorGroup.add(floorShape);
-
-			layer.add(floorGroup);
-			floorGroups.push(floorGroup);
-		}
+		layer.add(wrapper);
+		venueGroup = wrapper;
 
 		// Apply initial flat layout
-		const layouts = getFlatLayout(venue.floors, width, height);
-		floorGroups.forEach((group, i) => {
-			const l = layouts[i];
-			group.setAttrs({
-				x: l.x,
-				y: l.y,
-				scaleX: l.scaleX,
-				scaleY: l.scaleY,
-				skewX: l.skewX,
-				rotation: l.rotation
-			});
+		const layout = getFlatLayout(venue, width, height);
+		wrapper.setAttrs({
+			x: layout.x,
+			y: layout.y,
+			scaleX: layout.scaleX,
+			scaleY: layout.scaleY,
+			skewX: layout.skewX,
+			rotation: layout.rotation
 		});
 
 		layer.draw();
@@ -126,7 +119,7 @@
 	// React to view mode changes
 	$effect(() => {
 		const _mode = mapStore.viewMode;
-		if (stage && floorGroups.length > 0) {
+		if (stage && venueGroup) {
 			applyLayout();
 		}
 	});
@@ -135,9 +128,7 @@
 	$effect(() => {
 		const _cats = mapStore.activeCategories;
 		if (layer) {
-			for (const floor of venue.floors) {
-				updateSpotVisibility(layer, floor, mapStore.activeCategories);
-			}
+			updateSpotVisibility(layer, venue, mapStore.activeCategories);
 		}
 	});
 </script>

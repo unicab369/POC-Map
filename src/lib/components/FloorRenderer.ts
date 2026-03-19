@@ -1,5 +1,5 @@
 import Konva from 'konva';
-import type { Floor, Spot, POICategory, ShapeDef } from '$lib/types.ts';
+import type { Venue, Spot, POICategory, ShapeDef } from '$lib/types.ts';
 import { CATEGORY_COLORS } from '$lib/types.ts';
 import { renderShape } from '$lib/components/ShapeRenderer.ts';
 
@@ -65,33 +65,33 @@ function getLabelPosition(shape: ShapeDef): { x: number; y: number; width: numbe
 	}
 }
 
-export interface RenderFloorOptions {
+export interface RenderVenueOptions {
 	skipBackground?: boolean;
-	skipFloorLabel?: boolean;
+	skipVenueLabel?: boolean;
 }
 
-export function renderFloor(
-	floor: Floor,
+export function renderVenue(
+	venue: Venue,
 	onSpotClick: SpotClickHandler,
 	activeCategories: Set<POICategory>,
-	options?: RenderFloorOptions
+	options?: RenderVenueOptions
 ): Konva.Group {
-	const group = new Konva.Group({ name: `floor-${floor.id}` });
+	const group = new Konva.Group({ name: `venue-${venue.id}` });
 
-	// Floor background
+	// Venue background
 	if (!options?.skipBackground) {
 		group.add(
 			new Konva.Rect({
 				x: 0, y: 0,
-				width: floor.width, height: floor.height,
-				fill: floor.color,
+				width: venue.width, height: venue.height,
+				fill: venue.color,
 				stroke: '#94a3b8', strokeWidth: 2,
 				cornerRadius: 8
 			})
 		);
 	}
 
-	for (const zone of floor.zones) {
+	for (const zone of venue.zones) {
 		const zoneGroup = new Konva.Group({ name: `zone-${zone.id}` });
 
 		zoneGroup.add(renderShape(zone.shape, zone.style));
@@ -141,12 +141,12 @@ export function renderFloor(
 		group.add(zoneGroup);
 	}
 
-	// Floor label
-	if (!options?.skipFloorLabel) {
+	// Venue label
+	if (!options?.skipVenueLabel) {
 		group.add(
 			new Konva.Text({
-				x: floor.width / 2, y: floor.height + 8,
-				text: floor.name,
+				x: venue.width / 2, y: venue.height + 8,
+				text: venue.name,
 				fontSize: 14,
 				fontFamily: 'Inter, sans-serif',
 				fontStyle: '600',
@@ -162,10 +162,10 @@ export function renderFloor(
 
 export function updateSpotVisibility(
 	layer: Konva.Layer | Konva.Group,
-	floor: Floor,
+	venue: Venue,
 	activeCategories: Set<POICategory>
 ) {
-	for (const zone of floor.zones) {
+	for (const zone of venue.zones) {
 		for (const area of zone.areas) {
 			for (const spot of area.spots) {
 				const marker = layer.findOne(`.spot-${spot.id}`);

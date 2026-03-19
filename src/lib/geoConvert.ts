@@ -11,8 +11,8 @@ export interface GeoConverter {
 
 export function createGeoConverter(
 	bounds: GeoBounds,
-	floorWidth: number,
-	floorHeight: number
+	width: number,
+	height: number
 ): GeoConverter {
 	const [swLat, swLng] = bounds.sw;
 	const [neLat, neLng] = bounds.ne;
@@ -23,19 +23,19 @@ export function createGeoConverter(
 	const centerLat = (swLat + neLat) / 2;
 	const metersPerDegreeLat = 111320;
 	const metersPerDegreeLng = 111320 * Math.cos((centerLat * Math.PI) / 180);
-	const metersPerPixelX = (dLng * metersPerDegreeLng) / floorWidth;
-	const metersPerPixelY = (dLat * metersPerDegreeLat) / floorHeight;
+	const metersPerPixelX = (dLng * metersPerDegreeLng) / width;
+	const metersPerPixelY = (dLat * metersPerDegreeLat) / height;
 	const metersPerPixel = (metersPerPixelX + metersPerPixelY) / 2;
 
 	function latLngToPixel(lat: number, lng: number) {
-		const x = ((lng - swLng) / dLng) * floorWidth;
-		const y = ((neLat - lat) / dLat) * floorHeight; // Y flip
+		const x = ((lng - swLng) / dLng) * width;
+		const y = ((neLat - lat) / dLat) * height; // Y flip
 		return { x, y };
 	}
 
 	function pixelToLatLng(px: number, py: number) {
-		const lng = swLng + (px / floorWidth) * dLng;
-		const lat = neLat - (py / floorHeight) * dLat; // Y flip
+		const lng = swLng + (px / width) * dLng;
+		const lat = neLat - (py / height) * dLat; // Y flip
 		return { lat, lng };
 	}
 

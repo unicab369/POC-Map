@@ -49,23 +49,16 @@ export interface GeoBounds {
 	ne: [number, number]; // [lat, lng] northeast corner
 }
 
-export interface Floor {
-	id: string;
-	name: string;
-	level: number;
-	width: number;
-	height: number;
-	color: string;
-	zones: Zone[];
-	geoBounds?: GeoBounds;
-}
-
 export interface Venue {
 	id: string;
 	name: string;
 	type: VenueType;
 	description: string;
-	floors: Floor[];
+	width: number;
+	height: number;
+	color: string;
+	geoBounds?: GeoBounds;
+	zones: Zone[];
 }
 
 export const CATEGORY_COLORS: Record<POICategory, string> = {

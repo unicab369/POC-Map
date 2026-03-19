@@ -2,11 +2,11 @@
 	import { base } from '$app/paths';
 	import type { VenueType } from '$lib/types.ts';
 
-	let { name, type, description, floorCount, spotCount }: {
+	let { name, type, description, zoneCount, spotCount }: {
 		name: string;
 		type: VenueType;
 		description: string;
-		floorCount: number;
+		zoneCount: number;
 		spotCount: number;
 	} = $props();
 
@@ -31,7 +31,7 @@
 		<h2>{name}</h2>
 		<p>{description}</p>
 		<div class="card-meta">
-			<span>{floorCount} {floorCount === 1 ? 'floor' : 'floors'}</span>
+			<span>{zoneCount} {zoneCount === 1 ? 'zone' : 'zones'}</span>
 			<span class="dot"></span>
 			<span>{spotCount} points of interest</span>
 		</div>

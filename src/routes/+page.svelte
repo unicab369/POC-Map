@@ -9,11 +9,9 @@
 
 	function countSpots(venue: Venue): number {
 		let count = 0;
-		for (const floor of venue.floors) {
-			for (const zone of floor.zones) {
-				for (const area of zone.areas) {
-					count += area.spots.length;
-				}
+		for (const zone of venue.zones) {
+			for (const area of zone.areas) {
+				count += area.spots.length;
 			}
 		}
 		return count;
@@ -27,7 +25,7 @@
 <div class="home">
 	<div class="hero">
 		<h1>Venue Map Explorer</h1>
-		<p>Interactive floor plans with flat and isometric views. Choose a venue to explore.</p>
+		<p>Interactive venue maps with flat and isometric views. Choose a venue to explore.</p>
 	</div>
 	<div class="grid">
 		{#each venues as venue}
@@ -35,7 +33,7 @@
 				name={venue.name}
 				type={venue.type}
 				description={venue.description}
-				floorCount={venue.floors.length}
+				zoneCount={venue.zones.length}
 				spotCount={countSpots(venue)}
 			/>
 		{/each}
