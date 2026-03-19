@@ -26,12 +26,12 @@
 		<div class="toolbar-left">
 			<h1>{venue.name}</h1>
 		</div>
-		<div class="toolbar-center">
-			<CategoryFilter {categories} />
-		</div>
 		<div class="toolbar-right">
 			<ViewToggle />
 		</div>
+	</div>
+	<div class="filter-bar">
+		<CategoryFilter {categories} />
 	</div>
 	<div class="canvas-wrapper">
 		<MapCanvas {venue} />
@@ -57,19 +57,26 @@
 		flex-wrap: wrap;
 	}
 
+	.toolbar-left {
+		flex: 1;
+	}
+
 	.toolbar-left h1 {
 		font-size: 16px;
 		font-weight: 700;
 		white-space: nowrap;
 	}
 
-	.toolbar-center {
-		flex: 1;
-		display: flex;
-		justify-content: center;
+	.toolbar-right {
+		flex-shrink: 0;
 	}
 
-	.toolbar-right {
+	.filter-bar {
+		display: flex;
+		align-items: center;
+		padding: 6px 20px;
+		background: #1e293b;
+		border-bottom: 1px solid #334155;
 		flex-shrink: 0;
 	}
 

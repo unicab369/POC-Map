@@ -2,25 +2,19 @@
 	import { onMount } from 'svelte';
 	import type { Venue, Floor, Zone, Area, Spot, ShapeDef, ShapeStyle, POICategory } from '$lib/types.ts';
 	import { CATEGORY_COLORS } from '$lib/types.ts';
-	import { saveVenue } from '$lib/storage.ts';
-	import { createKonvaOverlay, type KonvaOverlayHandle } from '$lib/components/KonvaOverlay.ts';
 	import { createGeoConverter, type GeoConverter } from '$lib/geoConvert.ts';
 
 	let {
 		venue = $bindable(),
 		floorIndex = $bindable(0),
-		onreset
 	}: {
 		venue: Venue;
 		floorIndex?: number;
-		onreset?: () => void;
 	} = $props();
 
 	let mapContainer: HTMLDivElement;
 	let map: any;
 	let shapeLayers: any[] = [];
-	let previewMode = $state(false);
-	let overlay: KonvaOverlayHandle | null = null;
 	let floorBackgroundLayer: any = null;
 
 	type DrawLevel = 'zone' | 'area' | 'spot';
@@ -39,7 +33,10 @@
 	let editingOriginalShape: ShapeDef | null = null;
 	let zoneClickedFlag = false;
 
-	// Zone toolbar state
+	// Toolbar selection state (works for both zones and areas)
+	type EditingTarget = { type: 'zone'; zoneId: string } | { type: 'area'; zoneId: string; areaId: string };
+	let editingTarget = $state<EditingTarget | null>(null);
+	let editingTargetLayer: any = null;
 	let toolbarPosition = $state<{ x: number; y: number } | null>(null);
 	let activeToolbarAction = $state<'rename' | 'category' | 'style' | null>(null);
 	let renameValue = $state('');
@@ -104,19 +101,22 @@
 	}
 
 	function updateToolbarPosition() {
-		if (!editingLayer || !map || !mapContainer) {
+		const layer = editingTargetLayer ?? editingLayer;
+		if (!layer || !map || !mapContainer) {
 			toolbarPosition = null;
 			return;
 		}
-		const bounds = editingLayer.getBounds();
-		const topCenter = bounds.getNorth
-			? (window as any).L.latLng(bounds.getNorth(), (bounds.getWest() + bounds.getEast()) / 2)
-			: bounds.getCenter();
-		const point = map.latLngToContainerPoint(topCenter);
+		const bounds = layer.getBounds();
+		const L = (window as any).L;
+		// Position to the right of the shape, vertically centered
+		const rightCenter = L.latLng(
+			(bounds.getNorth() + bounds.getSouth()) / 2,
+			bounds.getEast()
+		);
+		const point = map.latLngToContainerPoint(rightCenter);
 		const containerRect = mapContainer.getBoundingClientRect();
-		// Clamp within map container
-		const x = Math.max(120, Math.min(point.x, containerRect.width - 120));
-		const y = Math.max(10, point.y - 50);
+		const x = Math.min(point.x + 20, containerRect.width - 200);
+		const y = Math.max(10, Math.min(point.y, containerRect.height - 200));
 		toolbarPosition = { x, y };
 	}
 
@@ -130,31 +130,84 @@
 		return currentFloor().zones.find(z => z.id === editingZoneId);
 	}
 
+	/** Returns the zone or area entity currently selected by the toolbar */
+	function getEditingEntity(): (Zone | Area) | undefined {
+		if (!editingTarget) return undefined;
+		const zone = currentFloor().zones.find(z => z.id === editingTarget!.zoneId);
+		if (!zone) return undefined;
+		if (editingTarget.type === 'zone') return zone;
+		return zone.areas.find(a => a.id === editingTarget!.areaId);
+	}
+
+	function getEditingEntityLevel(): DrawLevel {
+		return editingTarget?.type === 'area' ? 'area' : 'zone';
+	}
+
+	function getEditingEntityLabelClass(): string {
+		return editingTarget?.type === 'area' ? 'label-area' : 'label-zone';
+	}
+
+	function selectEntityForToolbar(target: EditingTarget, layer: any) {
+		// Deselect previous toolbar target if different
+		if (editingTargetLayer && editingTargetLayer !== layer) {
+			const prevEntity = getEditingEntity();
+			if (prevEntity) {
+				editingTargetLayer.setStyle({
+					color: prevEntity.style.stroke ?? '#cbd5e1',
+					weight: prevEntity.style.strokeWidth ?? 1,
+					dashArray: ''
+				});
+			}
+			if (resizeActive) { editingTargetLayer.pm.disable(); resizeActive = false; }
+		}
+		editingTarget = target;
+		editingTargetLayer = layer;
+		layer.setStyle({ weight: 3, dashArray: '6 4', color: '#facc15' });
+		resetToolbarSubState();
+		updateToolbarPosition();
+	}
+
+	function deselectEntity() {
+		if (editingTargetLayer) {
+			if (resizeActive) { editingTargetLayer.pm.disable(); resizeActive = false; }
+			const entity = getEditingEntity();
+			if (entity) {
+				editingTargetLayer.setStyle({
+					color: entity.style.stroke ?? '#cbd5e1',
+					weight: entity.style.strokeWidth ?? 1,
+					dashArray: ''
+				});
+			}
+		}
+		editingTarget = null;
+		editingTargetLayer = null;
+		toolbarPosition = null;
+		resetToolbarSubState();
+	}
+
 	function handleRenameConfirm() {
-		const zone = getEditingZone();
-		if (zone && renameValue.trim()) {
-			zone.name = renameValue.trim();
+		const entity = getEditingEntity();
+		if (entity && renameValue.trim()) {
+			entity.name = renameValue.trim();
 			venue = { ...venue };
-			// Update tooltip on the layer
-			if (editingLayer) {
-				editingLayer.unbindTooltip();
-				editingLayer.bindTooltip(zone.name, { permanent: true, direction: 'center', className: 'label-zone' });
+			if (editingTargetLayer) {
+				editingTargetLayer.unbindTooltip();
+				editingTargetLayer.bindTooltip(entity.name, { permanent: true, direction: 'center', className: getEditingEntityLabelClass() });
 			}
 		}
 		activeToolbarAction = null;
 	}
 
 	function handleCategoryChange(cat: POICategory) {
-		const zone = getEditingZone();
-		if (zone) {
-			zone.category = cat;
-			zone.style = defaultStyle('zone', cat);
+		const entity = getEditingEntity();
+		if (entity) {
+			entity.category = cat;
+			entity.style = defaultStyle(getEditingEntityLevel(), cat);
 			venue = { ...venue };
-			// Apply new style to layer
-			if (editingLayer) {
-				editingLayer.setStyle({
-					fillColor: zone.style.fill,
-					fillOpacity: zone.style.opacity ?? 0.6,
+			if (editingTargetLayer) {
+				editingTargetLayer.setStyle({
+					fillColor: entity.style.fill,
+					fillOpacity: entity.style.opacity ?? 0.6,
 					color: '#facc15',
 					weight: 3,
 					dashArray: '6 4'
@@ -165,24 +218,24 @@
 	}
 
 	function openStyleEditor() {
-		const zone = getEditingZone();
-		if (zone) {
-			styleFill = zone.style.fill;
-			styleOpacity = zone.style.opacity ?? 0.85;
-			styleStroke = zone.style.stroke ?? '#cbd5e1';
-			styleStrokeWidth = zone.style.strokeWidth ?? 1;
+		const entity = getEditingEntity();
+		if (entity) {
+			styleFill = entity.style.fill;
+			styleOpacity = entity.style.opacity ?? 0.85;
+			styleStroke = entity.style.stroke ?? '#cbd5e1';
+			styleStrokeWidth = entity.style.strokeWidth ?? 1;
 		}
 		activeToolbarAction = 'style';
 	}
 
 	function applyStyleChange() {
-		const zone = getEditingZone();
-		if (zone && editingLayer) {
-			zone.style.fill = styleFill;
-			zone.style.opacity = styleOpacity;
-			zone.style.stroke = styleStroke;
-			zone.style.strokeWidth = styleStrokeWidth;
-			editingLayer.setStyle({
+		const entity = getEditingEntity();
+		if (entity && editingTargetLayer) {
+			entity.style.fill = styleFill;
+			entity.style.opacity = styleOpacity;
+			entity.style.stroke = styleStroke;
+			entity.style.strokeWidth = styleStrokeWidth;
+			editingTargetLayer.setStyle({
 				fillColor: styleFill,
 				fillOpacity: styleOpacity,
 				color: '#facc15',
@@ -199,53 +252,77 @@
 	}
 
 	function toggleResize() {
-		if (!editingLayer) return;
+		if (!editingTargetLayer) return;
 		if (resizeActive) {
-			// Finalize
-			editingLayer.pm.disable();
-			let newShape = layerToShapeDef(editingLayer);
+			editingTargetLayer.pm.disable();
+			let newShape = layerToShapeDef(editingTargetLayer);
 			const converter = getGeoConverter();
 			if (converter) newShape = converter.shapeToPixel(newShape);
-			const zone = getEditingZone();
-			if (zone) {
-				zone.shape = newShape;
+			const entity = getEditingEntity();
+			if (entity) {
+				entity.shape = newShape;
 				venue = { ...venue };
 			}
 			resizeActive = false;
+			renderExistingShapes();
 		} else {
-			// Enable editing
-			editingLayer.pm.enable({ allowSelfIntersection: false });
+			editingTargetLayer.pm.enable({ allowSelfIntersection: false });
 			resizeActive = true;
 		}
 	}
 
 	function handleDuplicate() {
-		const zone = getEditingZone();
-		if (!zone) return;
-		const cloned: Zone = JSON.parse(JSON.stringify(zone));
-		cloned.id = generateId('zone');
-		cloned.name = zone.name + ' (copy)';
-		// Offset by 20px
-		cloned.shape = applyDelta(cloned.shape, 20, 20);
-		for (const area of cloned.areas) {
-			area.id = generateId('area');
-			area.shape = applyDelta(area.shape, 20, 20);
-			for (const spot of area.spots) {
+		if (!editingTarget) return;
+		if (editingTarget.type === 'zone') {
+			const zone = currentFloor().zones.find(z => z.id === editingTarget!.zoneId);
+			if (!zone) return;
+			const cloned: Zone = JSON.parse(JSON.stringify(zone));
+			cloned.id = generateId('zone');
+			cloned.name = zone.name + ' (copy)';
+			cloned.shape = applyDelta(cloned.shape, 20, 20);
+			for (const area of cloned.areas) {
+				area.id = generateId('area');
+				area.shape = applyDelta(area.shape, 20, 20);
+				for (const spot of area.spots) {
+					spot.id = generateId('spot');
+					spot.shape = applyDelta(spot.shape, 20, 20);
+				}
+			}
+			currentFloor().zones = [...currentFloor().zones, cloned];
+		} else {
+			const zone = currentFloor().zones.find(z => z.id === editingTarget!.zoneId);
+			if (!zone) return;
+			const area = zone.areas.find(a => a.id === editingTarget!.areaId);
+			if (!area) return;
+			const cloned: Area = JSON.parse(JSON.stringify(area));
+			cloned.id = generateId('area');
+			cloned.name = area.name + ' (copy)';
+			cloned.shape = applyDelta(cloned.shape, 20, 20);
+			for (const spot of cloned.spots) {
 				spot.id = generateId('spot');
 				spot.shape = applyDelta(spot.shape, 20, 20);
 			}
+			zone.areas = [...zone.areas, cloned];
 		}
-		const floor = currentFloor();
-		floor.zones = [...floor.zones, cloned];
 		venue = { ...venue };
+		deselectEntity();
 		deselectZone();
 		renderExistingShapes();
 	}
 
 	function handleDelete() {
-		const floor = currentFloor();
-		floor.zones = floor.zones.filter(z => z.id !== editingZoneId);
+		if (!editingTarget) return;
+		if (editingTarget.type === 'zone') {
+			const floor = currentFloor();
+			floor.zones = floor.zones.filter(z => z.id !== editingTarget!.zoneId);
+		} else {
+			const zone = currentFloor().zones.find(z => z.id === editingTarget!.zoneId);
+			if (zone) {
+				zone.areas = zone.areas.filter(a => a.id !== editingTarget!.areaId);
+			}
+		}
 		venue = { ...venue };
+		deselectEntity();
 		deselectZone();
 		renderExistingShapes();
 	}
@@ -277,11 +354,14 @@
 	}
 
 	function selectZoneForDrag(zoneId: string, layer: any) {
-		// Deselect previous without re-rendering
+		// Deselect previous entity toolbar if it was an area
+		deselectEntity();
+
+		// Deselect previous zone drag without re-rendering
 		if (editingLayer && editingLayer !== layer) {
 			editingLayer.pm.disableLayerDrag();
 			editingLayer.off('pm:dragend');
-			if (resizeActive) { editingLayer.pm.disable(); resizeActive = false; }
+			editingLayer.off('pm:dragstart');
 			const prevZone = currentFloor().zones.find(z => z.id === editingZoneId);
 			if (prevZone) {
 				editingLayer.setStyle({
@@ -306,16 +386,16 @@
 		layer.on('pm:dragstart', () => { isDragging = true; });
 		layer.on('pm:dragend', () => handleZoneDragEnd(layer));
 
-		resetToolbarSubState();
-		updateToolbarPosition();
+		// Set toolbar target to the zone
+		selectEntityForToolbar({ type: 'zone', zoneId }, layer);
 	}
 
 	function deselectZone() {
+		deselectEntity();
 		if (editingLayer) {
 			editingLayer.pm.disableLayerDrag();
 			editingLayer.off('pm:dragend');
 			editingLayer.off('pm:dragstart');
-			if (resizeActive) { editingLayer.pm.disable(); resizeActive = false; }
 			const prevZone = currentFloor().zones.find(z => z.id === editingZoneId);
 			if (prevZone) {
 				editingLayer.setStyle({
@@ -328,9 +408,7 @@
 		editingZoneId = '';
 		editingLayer = null;
 		editingOriginalShape = null;
-		toolbarPosition = null;
 		isDragging = false;
-		resetToolbarSubState();
 	}
 
 	function handleZoneDragEnd(layer: any) {
@@ -364,16 +442,22 @@
 
 	function handleKeydown(e: KeyboardEvent) {
 		if (e.key === 'Escape') {
-			if (resizeActive && editingLayer) {
-				editingLayer.pm.disable();
+			if (resizeActive && editingTargetLayer) {
+				editingTargetLayer.pm.disable();
 				resizeActive = false;
-				// Revert shape on layer from data
 				renderExistingShapes();
 				return;
 			}
 			if (activeToolbarAction || deleteConfirming) {
 				resetToolbarSubState();
 				return;
+			}
+			if (editingTarget) {
+				// If an area is selected (not via zone drag), just deselect entity
+				if (editingTarget.type === 'area') {
+					deselectEntity();
+					return;
+				}
 			}
 			if (editingZoneId) {
 				deselectZone();
@@ -437,6 +521,9 @@
 		editingZoneId = '';
 		editingLayer = null;
 		editingOriginalShape = null;
+		editingTarget = null;
+		editingTargetLayer = null;
+		toolbarPosition = null;
 
 		// Clear existing
 		for (const sl of shapeLayers) {
@@ -446,14 +533,29 @@
 
 		const floor = currentFloor();
 
+		// Helper: make a layer's tooltip clickable, triggering the same handler as the layer
+		function makeTooltipClickable(layer: any, handler: () => void) {
+			const L = (window as any).L;
+			layer.on('tooltipopen', () => {
+				const el = layer.getTooltip()?.getElement();
+				if (el) {
+					el.style.cursor = 'pointer';
+					el.style.pointerEvents = 'auto';
+					L.DomEvent.on(el, 'click', (e: any) => {
+						L.DomEvent.stopPropagation(e);
+						handler();
+					});
+				}
+			});
+		}
+
 		for (const zone of floor.zones) {
 			const zoneLayer = shapeDefToLayer(zone.shape, zone.style, zone.name, 'zone', converter);
 			if (zoneLayer) {
 				zoneLayer.addTo(map);
 				shapeLayers.push(zoneLayer);
 
-				// Click to select/deselect zone for dragging
-				zoneLayer.on('click', () => {
+				const handleZoneClick = () => {
 					zoneClickedFlag = true;
 					setTimeout(() => zoneClickedFlag = false, 0);
 					if (editingZoneId === zone.id) {
@@ -461,7 +563,10 @@
 					} else {
 						selectZoneForDrag(zone.id, zoneLayer);
 					}
-				});
+				};
+
+				zoneLayer.on('click', handleZoneClick);
+				makeTooltipClickable(zoneLayer, handleZoneClick);
 			}
 
 			for (const area of zone.areas) {
@@ -469,6 +574,37 @@
 				if (areaLayer) {
 					areaLayer.addTo(map);
 					shapeLayers.push(areaLayer);
+
+					const handleAreaClick = () => {
+						zoneClickedFlag = true;
+						setTimeout(() => zoneClickedFlag = false, 0);
+						// Deselect zone drag if active
+						if (editingZoneId) {
+							editingLayer?.pm.disableLayerDrag();
+							editingLayer?.off('pm:dragend');
+							editingLayer?.off('pm:dragstart');
+							const prevZone = currentFloor().zones.find(z => z.id === editingZoneId);
+							if (prevZone && editingLayer) {
+								editingLayer.setStyle({
+									color: prevZone.style.stroke ?? '#cbd5e1',
+									weight: prevZone.style.strokeWidth ?? 1,
+									dashArray: ''
+								});
+							}
+							editingZoneId = '';
+							editingLayer = null;
+							editingOriginalShape = null;
+						}
+						// Toggle area selection
+						if (editingTarget?.type === 'area' && editingTarget.areaId === area.id) {
+							deselectEntity();
+						} else {
+							selectEntityForToolbar({ type: 'area', zoneId: zone.id, areaId: area.id }, areaLayer);
+						}
+					};
+
+					areaLayer.on('click', handleAreaClick);
+					makeTooltipClickable(areaLayer, handleAreaClick);
 				}
 
 				for (const spot of area.spots) {
@@ -513,7 +649,27 @@
 			layer = L.polygon(latlngs, opts);
 		}
 
-		layer.bindTooltip(name, { permanent: level !== 'spot', direction: 'center', className: `label-${level}` });
+		if (level === 'zone') {
+			layer.bindTooltip(name, { permanent: true, direction: 'right', className: 'label-zone' });
+			layer.on('add', function () {
+				const bounds = this.getBounds();
+				const topLeft = converter ? bounds.getNorthWest() : bounds.getSouthWest();
+				if (this.getTooltip()) {
+					this.getTooltip().setLatLng(topLeft);
+				}
+			});
+		} else if (level === 'area') {
+			layer.bindTooltip(name, { permanent: true, direction: 'right', className: 'label-area', offset: [6, -6] });
+			layer.on('add', function () {
+				const bounds = this.getBounds();
+				const bottomLeft = converter ? bounds.getSouthWest() : bounds.getNorthWest();
+				if (this.getTooltip()) {
+					this.getTooltip().setLatLng(bottomLeft);
+				}
+			});
+		} else {
+			layer.bindTooltip(name, { permanent: level !== 'spot', direction: 'center', className: `label-${level}` });
+		}
 		return layer;
 	}
 
@@ -548,10 +704,6 @@
 		showDialog = false;
 		dialogName = '';
 		dialogDescription = '';
-	}
-
-	function handleSave() {
-		saveVenue(venue);
 	}
 
 	function initMap() {
@@ -678,62 +830,25 @@
 			showDialog = true;
 		});
 
-		// Click on map background deselects zone
+		// Click on map background deselects zone/area
 		map.on('click', () => {
 			if (zoneClickedFlag) return;
+			if (editingTarget) deselectEntity();
 			if (editingZoneId) deselectZone();
 		});
 
 		// Update toolbar position on map move/zoom
 		map.on('move zoom zoomend', () => {
-			if (editingZoneId) updateToolbarPosition();
+			if (editingTarget) updateToolbarPosition();
 		});
 
-		// Deselect zone when starting to draw
+		// Deselect zone/area when starting to draw
 		map.on('pm:drawstart', () => {
+			if (editingTarget) deselectEntity();
 			if (editingZoneId) deselectZone();
 		});
 
 		renderExistingShapes();
-
-		// Create Konva overlay (initially hidden)
-		overlay?.destroy();
-		const allCategories = new Set<POICategory>(['food', 'attraction', 'shop', 'restroom', 'info', 'gate', 'security']);
-		overlay = createKonvaOverlay(mapContainer, map, floor, allCategories, converter);
-		previewMode = false;
-	}
-
-	function togglePreview() {
-		previewMode = !previewMode;
-		if (previewMode) {
-			deselectZone();
-			// Update overlay with latest data, then show it
-			const allCategories = new Set<POICategory>(['food', 'attraction', 'shop', 'restroom', 'info', 'gate', 'security']);
-			overlay?.update(currentFloor(), allCategories);
-			overlay?.show();
-			// Hide Leaflet shape layers
-			for (const sl of shapeLayers) {
-				sl.setStyle({ opacity: 0, fillOpacity: 0 });
-				if (sl.getTooltip()) sl.closeTooltip();
-			}
-			// Disable geoman drawing
-			map.pm.disableDraw();
-			map.pm.removeControls();
-		} else {
-			overlay?.hide();
-			// Restore Leaflet shape layers
-			renderExistingShapes();
-			// Re-enable geoman controls
-			map.pm.addControls({
-				position: 'bottomright',
-				drawCircleMarker: false,
-				drawMarker: false,
-				drawPolyline: false,
-				drawText: false,
-				cutPolygon: false,
-				rotateMode: false
-			});
-		}
 	}
 
 	onMount(() => {
@@ -773,8 +888,6 @@
 		document.head.appendChild(script);
 
 		return () => {
-			overlay?.destroy();
-			overlay = null;
 			map?.remove();
 		};
 	});
@@ -783,8 +896,6 @@
 		const _fi = floorIndex;
 		const _vid = venue.id;
 		if (map) {
-			overlay?.destroy();
-			overlay = null;
 			map.remove();
 			initMap();
 		}
@@ -806,58 +917,22 @@
 				{/each}
 			</div>
 			<div class="toolbar-spacer"></div>
-			<button class="tb-btn preview-btn" class:active={previewMode} onclick={togglePreview}>
-				{previewMode ? 'Edit' : 'Preview'}
-			</button>
-			<button class="save-btn" onclick={handleSave}>Save</button>
-			{#if onreset}
-				<button class="reset-btn" onclick={onreset}>Reset</button>
-			{/if}
 		</div>
+		{#if editingZoneId}
 		<div class="toolbar-row">
-			<span class="toolbar-label">Draw:</span>
-			<div class="toolbar-group">
-				<button class="tb-btn" class:active={drawLevel === 'zone'} onclick={() => drawLevel = 'zone'}>Zone</button>
-				<button class="tb-btn" class:active={drawLevel === 'area'} onclick={() => drawLevel = 'area'}>Area</button>
-				<button class="tb-btn" class:active={drawLevel === 'spot'} onclick={() => drawLevel = 'spot'}>Spot</button>
-			</div>
-			{#if drawLevel === 'area' || drawLevel === 'spot'}
-				<div class="toolbar-sep"></div>
-				<span class="toolbar-label">in Zone:</span>
-				<select class="tb-select" bind:value={selectedZoneId}>
-					<option value="">-- select --</option>
-					{#each currentFloor().zones as zone}
-						<option value={zone.id}>{zone.name}</option>
-					{/each}
-				</select>
-			{/if}
-			{#if editingZoneId}
-				<div class="toolbar-sep"></div>
 				<span class="editing-badge">
 					Moving: {currentFloor().zones.find(z => z.id === editingZoneId)?.name ?? ''}
 				</span>
-			{/if}
-			{#if drawLevel === 'spot' && selectedZoneId}
-				{@const parentZone = currentFloor().zones.find(z => z.id === selectedZoneId)}
-				{#if parentZone}
-					<span class="toolbar-label">in Area:</span>
-					<select class="tb-select" bind:value={selectedAreaId}>
-						<option value="">-- select --</option>
-						{#each parentZone.areas as area}
-							<option value={area.id}>{area.name}</option>
-						{/each}
-					</select>
-				{/if}
-			{/if}
 		</div>
+		{/if}
 	</div>
 
 	<div class="map-area-wrapper">
 		<div class="map-area" bind:this={mapContainer}></div>
 
-		{#if toolbarPosition && editingZoneId && !isDragging && !previewMode}
-			{@const editingZone = getEditingZone()}
-			{#if editingZone}
+		{#if toolbarPosition && editingTarget && !isDragging}
+			{@const editingEntity = getEditingEntity()}
+			{#if editingEntity}
 				<!-- svelte-ignore a11y_no_static_element_interactions -->
 			<!-- svelte-ignore a11y_click_events_have_key_events -->
 				<div
@@ -866,100 +941,91 @@
 					onmousedown={(e) => e.stopPropagation()}
 					onclick={(e) => e.stopPropagation()}
 				>
-					<div class="zone-toolbar-arrow"></div>
-
+					<span class="zt-title">{editingTarget.type === 'area' ? 'Area' : 'Zone'}: {editingEntity.name}</span>
 					{#if deleteConfirming}
-						<div class="zt-confirm">
-							<span class="zt-confirm-text">Delete {editingZone.name}?</span>
-							<button class="zt-btn zt-btn-danger" onclick={handleDelete}>Yes</button>
-							<button class="zt-btn" onclick={() => deleteConfirming = false}>No</button>
-						</div>
+						<span class="zt-confirm-text">Delete {editingEntity.name}?</span>
+						<button class="zt-btn zt-btn-danger" onclick={handleDelete}>Yes</button>
+						<button class="zt-btn" onclick={() => deleteConfirming = false}>No</button>
 					{:else if activeToolbarAction === 'rename'}
-						<div class="zt-inline">
-							<!-- svelte-ignore a11y_autofocus -->
-							<input
-								class="zt-input"
-								type="text"
-								bind:value={renameValue}
-								placeholder="Zone name..."
-								autofocus
-							/>
+						<!-- svelte-ignore a11y_autofocus -->
+						<input
+							class="zt-input"
+							type="text"
+							bind:value={renameValue}
+							placeholder="Name..."
+							autofocus
+						/>
+						<div class="zt-row">
 							<button class="zt-btn zt-btn-primary" onclick={handleRenameConfirm} disabled={!renameValue.trim()}>OK</button>
 							<button class="zt-btn" onclick={() => activeToolbarAction = null}>Cancel</button>
 						</div>
 					{:else if activeToolbarAction === 'category'}
-						<div class="zt-category-picker">
-							{#each categories as cat}
-								<button
-									class="zt-cat-chip"
-									class:active={editingZone.category === cat}
-									onclick={() => handleCategoryChange(cat)}
-								>
-									<span class="zt-cat-dot" style="background: {CATEGORY_COLORS[cat]}"></span>
-									{cat}
-								</button>
-							{/each}
-						</div>
+						{#each categories as cat}
+							<button
+								class="zt-cat-chip"
+								class:active={editingEntity.category === cat}
+								onclick={() => handleCategoryChange(cat)}
+							>
+								<span class="zt-cat-dot" style="background: {CATEGORY_COLORS[cat]}"></span>
+								{cat}
+							</button>
+						{/each}
 					{:else if activeToolbarAction === 'style'}
-						<div class="zt-style-panel">
-							<div class="zt-style-row">
-								<span class="zt-style-label">Fill</span>
-								<div class="zt-swatches">
-									{#each colorSwatches as c}
-										<button
-											class="zt-swatch"
-											class:active={styleFill === c}
-											style="background: {c}"
-											title={c}
-											onclick={() => { styleFill = c; applyStyleChange(); }}
-										></button>
-									{/each}
-									<input type="color" class="zt-color-input" bind:value={styleFill} oninput={applyStyleChange} />
-								</div>
-							</div>
-							<div class="zt-style-row">
-								<span class="zt-style-label">Opacity</span>
-								<input type="range" class="zt-range" min="0.1" max="1" step="0.05" bind:value={styleOpacity} oninput={applyStyleChange} />
-								<span class="zt-range-val">{styleOpacity.toFixed(2)}</span>
-							</div>
-							<div class="zt-style-row">
-								<span class="zt-style-label">Stroke</span>
-								<div class="zt-swatches">
-									{#each colorSwatches as c}
-										<button
-											class="zt-swatch"
-											class:active={styleStroke === c}
-											style="background: {c}"
-											title={c}
-											onclick={() => { styleStroke = c; applyStyleChange(); }}
-										></button>
-									{/each}
-									<input type="color" class="zt-color-input" bind:value={styleStroke} oninput={applyStyleChange} />
-								</div>
-							</div>
-							<div class="zt-style-row">
-								<span class="zt-style-label">Width</span>
-								<div class="zt-btn-group">
-									{#each [1, 2, 3] as w}
-										<button
-											class="zt-btn"
-											class:active={styleStrokeWidth === w}
-											onclick={() => { styleStrokeWidth = w; applyStyleChange(); }}
-										>{w}</button>
-									{/each}
-								</div>
-							</div>
-							<div class="zt-style-actions">
-								<button class="zt-btn zt-btn-primary" onclick={handleStyleConfirm}>Done</button>
+						<div class="zt-style-row">
+							<span class="zt-style-label">Fill</span>
+							<div class="zt-swatches">
+								{#each colorSwatches as c}
+									<button
+										class="zt-swatch"
+										class:active={styleFill === c}
+										style="background: {c}"
+										title={c}
+										onclick={() => { styleFill = c; applyStyleChange(); }}
+									></button>
+								{/each}
+								<input type="color" class="zt-color-input" bind:value={styleFill} oninput={applyStyleChange} />
 							</div>
 						</div>
+						<div class="zt-style-row">
+							<span class="zt-style-label">Opacity</span>
+							<input type="range" class="zt-range" min="0.1" max="1" step="0.05" bind:value={styleOpacity} oninput={applyStyleChange} />
+							<span class="zt-range-val">{styleOpacity.toFixed(2)}</span>
+						</div>
+						<div class="zt-style-row">
+							<span class="zt-style-label">Stroke</span>
+							<div class="zt-swatches">
+								{#each colorSwatches as c}
+									<button
+										class="zt-swatch"
+										class:active={styleStroke === c}
+										style="background: {c}"
+										title={c}
+										onclick={() => { styleStroke = c; applyStyleChange(); }}
+									></button>
+								{/each}
+								<input type="color" class="zt-color-input" bind:value={styleStroke} oninput={applyStyleChange} />
+							</div>
+						</div>
+						<div class="zt-style-row">
+							<span class="zt-style-label">Width</span>
+							<div class="zt-btn-group">
+								{#each [1, 2, 3] as w}
+									<button
+										class="zt-btn"
+										class:active={styleStrokeWidth === w}
+										onclick={() => { styleStrokeWidth = w; applyStyleChange(); }}
+									>{w}</button>
+								{/each}
+							</div>
+						</div>
+						<button class="zt-btn zt-btn-primary" onclick={handleStyleConfirm}>Done</button>
 					{:else}
-						<button class="zt-btn" onclick={() => { renameValue = editingZone.name; activeToolbarAction = 'rename'; }}>Rename</button>
+						<button class="zt-btn" onclick={() => { renameValue = editingEntity.name; activeToolbarAction = 'rename'; }}>Rename</button>
 						<button class="zt-btn" onclick={() => activeToolbarAction = 'category'}>Category</button>
 						<button class="zt-btn" onclick={openStyleEditor}>Style</button>
 						<button class="zt-btn" class:active={resizeActive} onclick={toggleResize}>Resize</button>
-						<button class="zt-btn" onclick={handleDuplicate}>Dup</button>
-						<button class="zt-btn zt-btn-danger" onclick={() => deleteConfirming = true}>✕</button>
+						<button class="zt-btn" onclick={handleDuplicate}>Duplicate</button>
+						<button class="zt-btn zt-btn-danger" onclick={() => deleteConfirming = true}>Delete</button>
 					{/if}
 				</div>
 			{/if}
@@ -1016,8 +1082,8 @@
 	.toolbar-row {
 		display: flex;
 		align-items: center;
-		gap: 8px;
-		padding: 5px 12px;
+		gap: 10px;
+		padding: 8px 16px;
 	}
 
 	.toolbar-row:first-child {
@@ -1025,14 +1091,14 @@
 	}
 
 	.venue-name {
-		font-size: 14px;
+		font-size: 16px;
 		font-weight: 700;
 		color: #f1f5f9;
 		white-space: nowrap;
 	}
 
 	.toolbar-label {
-		font-size: 11px;
+		font-size: 13px;
 		font-weight: 600;
 		color: #64748b;
 		text-transform: uppercase;
@@ -1041,12 +1107,12 @@
 
 	.toolbar-group {
 		display: flex;
-		gap: 3px;
+		gap: 4px;
 	}
 
 	.toolbar-sep {
 		width: 1px;
-		height: 20px;
+		height: 24px;
 		background: #334155;
 	}
 
@@ -1055,11 +1121,11 @@
 	}
 
 	.tb-btn {
-		padding: 4px 10px;
+		padding: 6px 14px;
 		border: 1.5px solid #334155;
 		border-radius: 6px;
 		background: #1e293b;
-		font-size: 12px;
+		font-size: 14px;
 		font-weight: 500;
 		cursor: pointer;
 		font-family: 'Inter', sans-serif;
@@ -1075,52 +1141,14 @@
 	}
 
 	.tb-select {
-		padding: 4px 8px;
+		padding: 6px 10px;
 		border: 1px solid #334155;
 		border-radius: 6px;
-		font-size: 12px;
+		font-size: 14px;
 		font-family: 'Inter', sans-serif;
 		background: #0f172a;
 		color: #e2e8f0;
-		max-width: 160px;
-	}
-
-	.preview-btn.active {
-		border-color: #10b981;
-		background: #064e3b;
-		color: #34d399;
-	}
-
-	.save-btn {
-		padding: 4px 14px;
-		background: #4f46e5;
-		color: white;
-		border: none;
-		border-radius: 6px;
-		font-size: 12px;
-		font-weight: 600;
-		cursor: pointer;
-		font-family: 'Inter', sans-serif;
-	}
-
-	.save-btn:hover {
-		background: #4338ca;
-	}
-
-	.reset-btn {
-		padding: 4px 10px;
-		border: 1px solid #fca5a5;
-		border-radius: 6px;
-		background: #1e293b;
-		color: #ef4444;
-		font-size: 12px;
-		font-weight: 500;
-		cursor: pointer;
-		font-family: 'Inter', sans-serif;
-	}
-
-	.reset-btn:hover {
-		background: #451a1a;
+		max-width: 180px;
 	}
 
 	.map-area-wrapper {
@@ -1140,37 +1168,37 @@
 	.zone-toolbar {
 		position: absolute;
 		z-index: 500;
-		transform: translateX(-50%);
 		display: flex;
-		align-items: center;
-		gap: 4px;
+		flex-direction: column;
+		align-items: stretch;
+		gap: 6px;
 		background: #1e293b;
 		border: 1px solid #334155;
-		border-radius: 8px;
-		padding: 4px 6px;
+		border-radius: 12px;
+		padding: 12px;
 		box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
-		white-space: nowrap;
 		pointer-events: auto;
+		min-width: 180px;
 	}
 
-	.zone-toolbar-arrow {
-		position: absolute;
-		bottom: -6px;
-		left: 50%;
-		transform: translateX(-50%) rotate(45deg);
-		width: 10px;
-		height: 10px;
-		background: #1e293b;
-		border-right: 1px solid #334155;
+	.zt-title {
+		font-size: 14px;
+		font-weight: 600;
+		color: #94a3b8;
+		padding-bottom: 4px;
 		border-bottom: 1px solid #334155;
+		margin-bottom: 2px;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
 	}
 
 	.zt-btn {
-		padding: 3px 8px;
+		padding: 10px 20px;
 		border: 1px solid #334155;
-		border-radius: 5px;
+		border-radius: 8px;
 		background: #0f172a;
-		font-size: 11px;
+		font-size: 17px;
 		font-weight: 500;
 		cursor: pointer;
 		font-family: 'Inter', sans-serif;
@@ -1215,21 +1243,20 @@
 		color: #fca5a5;
 	}
 
-	.zt-inline {
+	.zt-row {
 		display: flex;
-		align-items: center;
 		gap: 4px;
 	}
 
 	.zt-input {
-		padding: 3px 6px;
+		padding: 10px 12px;
 		border: 1px solid #334155;
-		border-radius: 5px;
-		font-size: 11px;
+		border-radius: 8px;
+		font-size: 17px;
 		font-family: 'Inter', sans-serif;
 		background: #0f172a;
 		color: #e2e8f0;
-		width: 140px;
+		width: 100%;
 		outline: none;
 	}
 
@@ -1237,34 +1264,22 @@
 		border-color: #818cf8;
 	}
 
-	.zt-confirm {
-		display: flex;
-		align-items: center;
-		gap: 6px;
-	}
-
 	.zt-confirm-text {
-		font-size: 11px;
+		font-size: 17px;
 		font-weight: 500;
 		color: #fca5a5;
-	}
-
-	.zt-category-picker {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 3px;
-		max-width: 320px;
+		text-align: center;
 	}
 
 	.zt-cat-chip {
 		display: flex;
 		align-items: center;
-		gap: 4px;
-		padding: 3px 8px;
+		gap: 8px;
+		padding: 10px 14px;
 		border: 1px solid #334155;
-		border-radius: 5px;
+		border-radius: 8px;
 		background: #0f172a;
-		font-size: 11px;
+		font-size: 17px;
 		font-weight: 500;
 		cursor: pointer;
 		font-family: 'Inter', sans-serif;
@@ -1285,19 +1300,13 @@
 	}
 
 	.zt-cat-dot {
-		width: 8px;
-		height: 8px;
+		width: 14px;
+		height: 14px;
 		border-radius: 50%;
 		flex-shrink: 0;
 	}
 
 	/* Style panel */
-	.zt-style-panel {
-		display: flex;
-		flex-direction: column;
-		gap: 6px;
-		min-width: 260px;
-	}
 
 	.zt-style-row {
 		display: flex;
@@ -1306,11 +1315,11 @@
 	}
 
 	.zt-style-label {
-		font-size: 10px;
+		font-size: 15px;
 		font-weight: 600;
 		color: #64748b;
 		text-transform: uppercase;
-		width: 42px;
+		width: 56px;
 		flex-shrink: 0;
 	}
 
@@ -1322,9 +1331,9 @@
 	}
 
 	.zt-swatch {
-		width: 16px;
-		height: 16px;
-		border-radius: 3px;
+		width: 26px;
+		height: 26px;
+		border-radius: 4px;
 		border: 1.5px solid #475569;
 		cursor: pointer;
 		padding: 0;
@@ -1341,8 +1350,8 @@
 	}
 
 	.zt-color-input {
-		width: 20px;
-		height: 16px;
+		width: 28px;
+		height: 26px;
 		border: none;
 		padding: 0;
 		background: none;
@@ -1357,21 +1366,15 @@
 	}
 
 	.zt-range-val {
-		font-size: 10px;
+		font-size: 15px;
 		color: #94a3b8;
-		width: 28px;
+		width: 36px;
 		text-align: right;
 	}
 
 	.zt-btn-group {
 		display: flex;
 		gap: 2px;
-	}
-
-	.zt-style-actions {
-		display: flex;
-		justify-content: flex-end;
-		margin-top: 2px;
 	}
 
 	.dialog-overlay {
@@ -1477,12 +1480,12 @@
 	}
 
 	.editing-badge {
-		font-size: 11px;
+		font-size: 13px;
 		font-weight: 600;
 		color: #facc15;
 		background: #422006;
-		padding: 2px 8px;
-		border-radius: 4px;
+		padding: 4px 10px;
+		border-radius: 6px;
 		border: 1px solid #facc15;
 		white-space: nowrap;
 	}
@@ -1492,9 +1495,17 @@
 		font-size: 12px !important;
 	}
 
+	:global(.label-zone::before) {
+		display: none !important;
+	}
+
 	:global(.label-area) {
 		font-weight: 500 !important;
 		font-size: 11px !important;
+	}
+
+	:global(.label-area::before) {
+		display: none !important;
 	}
 
 	:global(.label-spot) {

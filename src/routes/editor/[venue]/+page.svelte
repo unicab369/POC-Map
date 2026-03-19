@@ -3,7 +3,7 @@
 	import { parkVenue } from '$lib/data/park.ts';
 	import { mallVenue } from '$lib/data/mall.ts';
 	import { airportVenue } from '$lib/data/airport.ts';
-	import { loadVenue, clearVenue } from '$lib/storage.ts';
+	import { loadVenue } from '$lib/storage.ts';
 	import MapEditor from '$lib/components/MapEditor.svelte';
 	import type { Venue } from '$lib/types.ts';
 
@@ -23,12 +23,6 @@
 		return structuredClone(defaultVenues[id] ?? parkVenue);
 	}
 
-	function handleReset() {
-		clearVenue(venueId);
-		venue = structuredClone(defaultVenues[venueId] ?? parkVenue);
-		floorIndex = 0;
-	}
-
 	// React to route param changes
 	$effect(() => {
 		const id = $page.params.venue ?? 'park';
@@ -42,7 +36,7 @@
 </svelte:head>
 
 <div class="editor-page">
-	<MapEditor bind:venue bind:floorIndex onreset={handleReset} />
+	<MapEditor bind:venue bind:floorIndex />
 </div>
 
 <style>
