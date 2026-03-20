@@ -996,26 +996,20 @@
 		const midpoints = getShapeEdgeMidpoints();
 		if (!midpoints) return;
 
+		const size = 30;
 		for (let i = 0; i < 4; i++) {
 			const angle = getShapeEdgeAngle(i);
-			// Determine orientation based on edge angle
-			const absAngle = Math.abs(angle % 180);
-			const isHorizontalish = absAngle < 45 || absAngle > 135;
-			const w = isHorizontalish ? 30 : 8;
-			const h = isHorizontalish ? 8 : 30;
 			const icon = L.divIcon({
-				className: 'shape-edge-handle',
-				iconSize: [w, h],
-				iconAnchor: [w / 2, h / 2]
+				className: 'shape-edge-handle-container',
+				iconSize: [size, size],
+				iconAnchor: [size / 2, size / 2],
+				html: `<div class="shape-edge-handle" style="transform: rotate(${angle}deg)"></div>`
 			});
 			const marker = L.marker(midpoints[i], {
 				icon,
 				draggable: true,
 				zIndexOffset: 10000
 			}).addTo(map);
-
-			const el = marker.getElement();
-			if (el) el.style.transform += ` rotate(${angle}deg)`;
 
 			marker.on('drag', () => handleShapeEdgeDrag(i, marker.getLatLng()));
 			marker.on('dragend', () => handleShapeEdgeDragEnd());
@@ -1028,6 +1022,11 @@
 		if (!midpoints) return;
 		for (let i = 0; i < shapeEdgeMarkers.length && i < midpoints.length; i++) {
 			shapeEdgeMarkers[i].setLatLng(midpoints[i]);
+			const el = shapeEdgeMarkers[i].getElement();
+			if (el) {
+				const bar = el.querySelector('.shape-edge-handle');
+				if (bar) bar.style.transform = `rotate(${getShapeEdgeAngle(i)}deg)`;
+			}
 		}
 	}
 
@@ -1039,49 +1038,54 @@
 		const ring: any[] = Array.isArray(latlngs[0]) ? latlngs[0] : latlngs;
 		if (ring.length !== 4) return;
 
-		// The dragged edge is between vertices edgeIndex and (edgeIndex+1)%4
+		// Dragged edge vertices
 		const i0 = edgeIndex;
 		const i1 = (edgeIndex + 1) % 4;
+		// Opposite edge vertices (fixed during drag) — i0 pairs with i3, i1 pairs with i2
+		const i2 = (edgeIndex + 2) % 4;
+		const i3 = (edgeIndex + 3) % 4;
 
-		// Calculate the perpendicular direction to this edge
-		const p0 = map.latLngToContainerPoint(ring[i0]);
-		const p1 = map.latLngToContainerPoint(ring[i1]);
-		const edgeDx = p1.x - p0.x;
-		const edgeDy = p1.y - p0.y;
-		const edgeLen = Math.sqrt(edgeDx * edgeDx + edgeDy * edgeDy);
-		if (edgeLen === 0) return;
+		const op2 = map.latLngToContainerPoint(ring[i2]);
+		const op3 = map.latLngToContainerPoint(ring[i3]);
 
-		// Perpendicular unit vector (pointing "outward")
-		const perpX = -edgeDy / edgeLen;
-		const perpY = edgeDx / edgeLen;
+		// Perpendicular direction derived from opposite edge (stable reference)
+		const oppDx = op2.x - op3.x;
+		const oppDy = op2.y - op3.y;
+		const oppLen = Math.sqrt(oppDx * oppDx + oppDy * oppDy);
+		if (oppLen === 0) return;
 
-		// Current edge midpoint
-		const midX = (p0.x + p1.x) / 2;
-		const midY = (p0.y + p1.y) / 2;
+		let perpX = -oppDy / oppLen;
+		let perpY = oppDx / oppLen;
 
-		// Drag point in container coords
+		// Ensure perpendicular points from opposite edge toward dragged edge
+		const curP0 = map.latLngToContainerPoint(ring[i0]);
+		if ((curP0.x - op3.x) * perpX + (curP0.y - op3.y) * perpY < 0) {
+			perpX = -perpX;
+			perpY = -perpY;
+		}
+
+		// Project drag point: perpendicular distance from opposite edge
 		const dragPt = map.latLngToContainerPoint(newLatLng);
-		const dx = dragPt.x - midX;
-		const dy = dragPt.y - midY;
+		const dragPerp = (dragPt.x - op3.x) * perpX + (dragPt.y - op3.y) * perpY;
 
-		// Project delta onto perpendicular
-		const proj = dx * perpX + dy * perpY;
+		if (dragPerp < 5) return; // prevent flipping past opposite edge
 
-		// Move both vertices of this edge by the projected amount along perpendicular
+		// Set dragged vertices to absolute positions (no delta accumulation)
 		const newRing = ring.map((ll: any, idx: number) => {
-			if (idx === i0 || idx === i1) {
-				const pt = map.latLngToContainerPoint(ll);
+			if (idx === i0) {
 				return map.containerPointToLatLng(L.point(
-					pt.x + proj * perpX,
-					pt.y + proj * perpY
+					op3.x + dragPerp * perpX, op3.y + dragPerp * perpY
+				));
+			}
+			if (idx === i1) {
+				return map.containerPointToLatLng(L.point(
+					op2.x + dragPerp * perpX, op2.y + dragPerp * perpY
 				));
 			}
 			return ll;
 		});
 
 		editModeLayer.setLatLngs([newRing]);
-
-		// Disable pm during drag to avoid interference
 		editModeLayer.pm.disable();
 
 		repositionShapeEdgeMarkers();
@@ -1504,6 +1508,7 @@
 		removeOverlayDragHandlers();
 		removeOverlayCornerMarkers();
 		removeOverlaySelectionRect();
+		unhookOverlayRotation();
 		if (overlayLayer && map) {
 			map.removeLayer(overlayLayer);
 			overlayLayer = null;
@@ -1520,6 +1525,17 @@
 		overlayOpacity = 0.5;
 		overlayRotation = 0;
 		clearOverlayStorage(venue.id);
+	}
+
+	function resetOverlay() {
+		if (!overlayLayer || !map || !overlayImageUrl) return;
+		const wasSelected = editModeSelection === 'overlay';
+		if (wasSelected) deselectEditModeItem();
+		overlayRotation = 0;
+		removeOverlayFromMap();
+		addOverlayToMap(); // re-adds with default venue bounds, rotation 0
+		if (wasSelected) selectEditModeItem('overlay');
+		persistOverlay();
 	}
 
 	function persistOverlay() {
@@ -1736,6 +1752,8 @@
 
 		let rotating = false;
 		let centerPt: any = null;
+		let startAngle = 0;
+		let startRotation = 0;
 
 		const onRotateDown = (e: any) => {
 			if (!overlayLayer || editModeSelection !== 'overlay') return;
@@ -1746,6 +1764,14 @@
 
 			const bounds = overlayLayer.getBounds();
 			centerPt = map.latLngToContainerPoint(bounds.getCenter());
+			startRotation = overlayRotation;
+
+			const touch = e.touches ? e.touches[0] : e;
+			const container = map.getContainer();
+			const containerRect = container.getBoundingClientRect();
+			const mx = (touch.clientX ?? touch.pageX) - containerRect.left;
+			const my = (touch.clientY ?? touch.pageY) - containerRect.top;
+			startAngle = Math.atan2(mx - centerPt.x, -(my - centerPt.y)) * (180 / Math.PI);
 		};
 
 		const onMouseMove = (e: any) => {
@@ -1759,8 +1785,11 @@
 
 			const dx = mx - centerPt.x;
 			const dy = my - centerPt.y;
-			let angle = Math.atan2(dx, -dy) * (180 / Math.PI);
-			if (angle < 0) angle += 360;
+			let currentAngle = Math.atan2(dx, -dy) * (180 / Math.PI);
+			let delta = currentAngle - startAngle;
+			let angle = startRotation + delta;
+			// Normalize to 0–360
+			angle = ((angle % 360) + 360) % 360;
 			overlayRotation = Math.round(angle);
 			applyOverlayRotation();
 
@@ -1921,6 +1950,10 @@
 		const center = bounds.getCenter();
 		const centerPt = map.latLngToContainerPoint(center);
 
+		// Save opposite edge visual position before changing bounds
+		const oppIdx = (edgeIndex + 2) % 4;
+		const oldOppMid = getRotatedOverlayEdgeMidpoints()[oppIdx];
+
 		// Inverse-rotate the dragged point back to axis-aligned space
 		const rad = -overlayRotation * Math.PI / 180;
 		const dragPt = map.latLngToContainerPoint(newLatLng);
@@ -1948,6 +1981,22 @@
 		const newBounds = L.latLngBounds([south, west], [north, east]);
 		overlayLayer.setBounds(newBounds);
 		applyOverlayRotation();
+
+		// Compensate: changing one bound shifts the center/rotation pivot,
+		// causing the opposite edge to drift visually. Shift entire bounds to fix.
+		if (overlayRotation !== 0) {
+			const newOppMid = getRotatedOverlayEdgeMidpoints()[oppIdx];
+			const dLat = oldOppMid.lat - newOppMid.lat;
+			const dLng = oldOppMid.lng - newOppMid.lng;
+			if (Math.abs(dLat) > 1e-10 || Math.abs(dLng) > 1e-10) {
+				const b = overlayLayer.getBounds();
+				overlayLayer.setBounds(L.latLngBounds(
+					[b.getSouth() + dLat, b.getWest() + dLng],
+					[b.getNorth() + dLat, b.getEast() + dLng]
+				));
+				applyOverlayRotation();
+			}
+		}
 
 		// Reposition all markers
 		const updatedCorners = getRotatedOverlayCorners();
@@ -2110,12 +2159,37 @@
 
 	function hookOverlayRotation() {
 		if (!overlayLayer) return;
-		const originalReset = overlayLayer._reset;
-		if (!originalReset) return;
-		overlayLayer._reset = function () {
-			originalReset.call(this);
-			applyOverlayRotation();
-		};
+		unhookOverlayRotation();
+
+		const el = overlayLayer.getElement();
+		if (!el) return;
+
+		// MutationObserver catches ALL transform changes — zoom animations,
+		// moveend resets, etc. — regardless of whether Leaflet uses events,
+		// requestAnimationFrame, or CSS transitions.
+		const observer = new MutationObserver(() => {
+			if (!overlayLayer) return;
+			const transform = el.style.transform || '';
+			const expected = `rotate(${overlayRotation}deg)`;
+			if (!transform.includes(expected)) {
+				const cleaned = transform.replace(/\s*rotate\([^)]*\)/g, '');
+				el.style.transform = cleaned + ` ${expected}`;
+				el.style.transformOrigin = 'center center';
+			}
+		});
+
+		observer.observe(el, { attributes: true, attributeFilter: ['style'] });
+		(overlayLayer as any)._rotationObserver = observer;
+		applyOverlayRotation();
+	}
+
+	function unhookOverlayRotation() {
+		if (!overlayLayer) return;
+		const observer = (overlayLayer as any)._rotationObserver;
+		if (observer) {
+			observer.disconnect();
+			(overlayLayer as any)._rotationObserver = null;
+		}
 	}
 
 	function updateOverlayRotation() {
@@ -2983,7 +3057,7 @@
 				</div>
 			</div>
 
-			<div class="sp-section">
+			<div class="sp-section sp-section-stroke">
 				<span class="sp-section-label">Stroke</span>
 				<div class="sp-color-grid">
 					{#each strokeSwatches as c}
@@ -3028,6 +3102,7 @@
 						<input type="range" class="zt-range sp-range-full" min="0" max="1" step="0.05" bind:value={overlayOpacity} oninput={updateOverlayOpacity} />
 						<span class="zt-range-val">{overlayOpacity.toFixed(2)}</span>
 					</div>
+					<button class="zt-btn sp-btn-reset" onclick={resetOverlay}>Reset Image</button>
 					{:else}
 					<label class="sp-overlay-upload">
 						<input type="file" accept="image/*" onchange={handleOverlayFile} hidden />
@@ -3273,6 +3348,7 @@
 		flex: 1;
 		overflow-y: auto;
 		padding: 16px;
+		padding-bottom: 40px;
 		display: flex;
 		flex-direction: column;
 		gap: 16px;
@@ -3327,6 +3403,12 @@
 		color: #64748b;
 		text-transform: uppercase;
 		letter-spacing: 0.05em;
+	}
+
+	.sp-section-stroke {
+		margin-top: 8px;
+		padding-top: 16px;
+		border-top: 1px solid #334155;
 	}
 
 	.sp-input {
@@ -3790,6 +3872,29 @@
 		height: 4px;
 		accent-color: #818cf8;
 		max-width: 100px;
+		-webkit-appearance: none;
+		appearance: none;
+		background: #334155;
+		border-radius: 2px;
+	}
+
+	.zt-range::-webkit-slider-thumb {
+		-webkit-appearance: none;
+		width: 16px;
+		height: 16px;
+		border-radius: 50%;
+		background: #818cf8;
+		border: 2px solid #fff;
+		cursor: pointer;
+	}
+
+	.zt-range::-moz-range-thumb {
+		width: 16px;
+		height: 16px;
+		border-radius: 50%;
+		background: #818cf8;
+		border: 2px solid #fff;
+		cursor: pointer;
 	}
 
 	.zt-range.sp-range-full {
@@ -4051,16 +4156,28 @@
 	:global(.overlay-edge-handle:hover) {
 		background: #fbbf24;
 	}
+	:global(.shape-edge-handle-container) {
+		background: transparent !important;
+		border: none !important;
+		box-shadow: none !important;
+	}
 	:global(.shape-edge-handle) {
+		width: 30px;
+		height: 8px;
 		background: #38bdf8;
 		border: 2px solid #ffffff;
 		border-radius: 3px;
 		cursor: grab;
 		box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+		position: absolute;
+		top: 50%;
+		left: 50%;
+		margin-left: -15px;
+		margin-top: -4px;
+		transform-origin: center;
 	}
 	:global(.shape-edge-handle:hover) {
 		background: #0ea5e9;
-		transform: scale(1.2);
 	}
 
 </style>
