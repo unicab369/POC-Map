@@ -51,6 +51,11 @@
 		const width = containerEl.clientWidth;
 		const height = containerEl.clientHeight;
 
+		if (width === 0 || height === 0) {
+			requestAnimationFrame(() => buildCanvas());
+			return;
+		}
+
 		stage = new Konva.Stage({
 			container: containerEl,
 			width,
