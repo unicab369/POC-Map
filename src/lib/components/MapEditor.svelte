@@ -1,14 +1,18 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import type { Venue, Zone, Area, Spot, ShapeDef, ShapeStyle, POICategory } from '$lib/types.ts';
+	import type { Venue, Zone, Area, Spot, ShapeDef, ShapeStyle, POICategory, EditingTarget } from '$lib/types.ts';
 	import { CATEGORY_COLORS } from '$lib/types.ts';
 	import { createGeoConverter, type GeoConverter } from '$lib/geoConvert.ts';
 	import { saveOverlay, loadOverlay, clearOverlayStorage } from '$lib/storage.ts';
 
 	let {
 		venue = $bindable(),
+		initialEditTarget = null,
+		oneditchange = (_target: EditingTarget | null) => {},
 	}: {
 		venue: Venue;
+		initialEditTarget?: EditingTarget | null;
+		oneditchange?: (target: EditingTarget | null) => void;
 	} = $props();
 
 	let mapContainer: HTMLDivElement;
@@ -42,7 +46,6 @@
 	let zoneClickedFlag = false;
 
 	// Toolbar selection state (works for both zones and areas)
-	type EditingTarget = { type: 'zone'; zoneId: string } | { type: 'area'; zoneId: string; areaId: string } | { type: 'spot'; zoneId: string; areaId: string; spotId: string };
 	let editingTarget = $state<EditingTarget | null>(null);
 	let editingTargetLayer: any = null;
 	let toolbarPosition = $state<{ x: number; y: number } | null>(null);
@@ -77,8 +80,20 @@
 	// Original shape snapshot for reset
 	let editModeOriginalShapes: any = null;
 
+	// Undo/redo history
+	let undoStack = $state<any[]>([]);
+	let redoStack = $state<any[]>([]);
+	let canUndo = $derived(undoStack.length > 0);
+	let canRedo = $derived(redoStack.length > 0);
+
 	// Edit mode map visibility (persisted)
 	let editModeShowMap = $state(false);
+
+	// Vertex circle size (persisted)
+	let vertexSize = $state(20);
+
+	// Selected vertex state (for delete button)
+	let selectedVertexMarker = $state<any>(null);
 
 	// Image overlay state
 	let overlayImageUrl = $state('');
@@ -472,7 +487,10 @@
 
 	function enterEditMode() {
 		if (!editingTarget) return;
-		const target = { ...editingTarget } as EditingTarget;
+		enterEditModeForTarget({ ...editingTarget } as EditingTarget);
+	}
+
+	function enterEditModeForTarget(target: EditingTarget) {
 		const entity = (() => {
 			const zone = venue.zones.find(z => z.id === target.zoneId);
 			if (!zone) return undefined;
@@ -485,9 +503,12 @@
 
 		editModeTarget = target;
 		editMode = true;
+		oneditchange(target);
 
 		// Snapshot original shapes for reset
 		editModeOriginalShapes = snapshotEditModeShapes(target);
+		undoStack = [];
+		redoStack = [];
 
 		// Hide Geoman drawing controls (not useful in edit mode)
 		map.pm.removeControls();
@@ -551,16 +572,81 @@
 				if (p && shapeRotateMarker) shapeRotateMarker.setLatLng(p);
 				repositionShapeEdgeMarkers();
 				saveEditModeShapesToData();
+				selectedVertexMarker = null;
+				hookVertexMarkerClicks();
 			});
 
 			setupShapeDragOnPath();
 			createShapeRotateMarker();
 			createShapeEdgeMarkers();
+			hookVertexMarkerClicks();
 		} else if (item === 'overlay') {
 			createOverlaySelectionRect();
 			createOverlayCornerMarkers();
 		}
 		editModeSelection = item;
+	}
+
+	// ── Vertex selection (for delete button) ──
+
+	function hookVertexMarkerClicks() {
+		if (!editModeLayer) return;
+		selectedVertexMarker = null;
+		// Geoman stores vertex markers in layer.pm._markers (array of rings, each an array of markers)
+		const markerGroups = editModeLayer.pm?._markers;
+		if (!markerGroups) return;
+		const markers = Array.isArray(markerGroups[0]) ? markerGroups[0] : markerGroups;
+		for (const m of markers) {
+			if (!m || !m.on) continue;
+			m.on('click', () => {
+				selectedVertexMarker = m;
+				highlightSelectedVertex(m);
+			});
+		}
+	}
+
+	function highlightSelectedVertex(marker: any) {
+		// Reset all vertex marker styles, highlight the selected one
+		const markerGroups = editModeLayer?.pm?._markers;
+		if (!markerGroups) return;
+		const markers = Array.isArray(markerGroups[0]) ? markerGroups[0] : markerGroups;
+		for (const m of markers) {
+			const el = m?._icon;
+			if (!el) continue;
+			el.style.outline = m === marker ? '3px solid #ef4444' : '';
+			el.style.outlineOffset = m === marker ? '2px' : '';
+		}
+	}
+
+	function deleteSelectedVertex() {
+		if (!selectedVertexMarker || !editModeLayer) return;
+		const latlngs = editModeLayer.getLatLngs()[0];
+		if (!latlngs || latlngs.length <= 3) return; // need at least 3 vertices for a polygon
+
+		// Find the index of the selected vertex
+		const markerGroups = editModeLayer.pm._markers;
+		const markers = Array.isArray(markerGroups[0]) ? markerGroups[0] : markerGroups;
+		const idx = markers.indexOf(selectedVertexMarker);
+		if (idx === -1) return;
+
+		// Remove the vertex
+		latlngs.splice(idx, 1);
+		editModeLayer.setLatLngs([latlngs]);
+
+		// Re-enable pm to refresh vertex markers
+		editModeLayer.pm.disable();
+		editModeLayer.pm.enable({ allowSelfIntersection: false });
+
+		selectedVertexMarker = null;
+
+		// Re-hook vertex clicks on new markers
+		hookVertexMarkerClicks();
+
+		// Update handles + save
+		const p = getShapeRotateHandlePos();
+		if (p && shapeRotateMarker) shapeRotateMarker.setLatLng(p);
+		repositionShapeEdgeMarkers();
+		saveEditModeShapesToData();
 	}
 
 	// ── Shape drag via direct DOM handler on SVG _path element ──
@@ -654,7 +740,9 @@
 					editModeLayer.pm.enable({ allowSelfIntersection: false });
 					// Re-attach to possibly-new _path after pm.enable()
 					requestAnimationFrame(() => setupShapeDragOnPath());
+					hookVertexMarkerClicks();
 				}
+				selectedVertexMarker = null;
 				const p = getShapeRotateHandlePos();
 				if (p && shapeRotateMarker) shapeRotateMarker.setLatLng(p);
 				repositionShapeEdgeMarkers();
@@ -876,6 +964,8 @@
 			editModeLayer.pm.enable({ allowSelfIntersection: false });
 			// Re-attach shape drag handler since _path may have changed
 			requestAnimationFrame(() => setupShapeDragOnPath());
+			selectedVertexMarker = null;
+			hookVertexMarkerClicks();
 			const p = getShapeRotateHandlePos();
 			if (p && shapeRotateMarker) shapeRotateMarker.setLatLng(p);
 			// Recreate edge markers since shape may have changed type
@@ -917,8 +1007,80 @@
 		});
 	}
 
+	function pushUndoSnapshot() {
+		if (!editModeTarget) return;
+		const snap = snapshotEditModeShapes(editModeTarget);
+		if (snap) {
+			undoStack.push(snap);
+			undoStack = undoStack; // trigger reactivity
+			redoStack = [];
+		}
+	}
+
+	function applySnapshot(snap: any) {
+		if (!editModeTarget) return;
+		const zone = venue.zones.find(z => z.id === editModeTarget.zoneId);
+		if (!zone) return;
+
+		if (editModeTarget.type === 'zone') {
+			zone.shape = snap.shape;
+			for (const aSnap of snap.areas) {
+				const area = zone.areas.find((a: any) => a.id === aSnap.id);
+				if (area) {
+					area.shape = aSnap.shape;
+					for (const sSnap of aSnap.spots) {
+						const spot = area.spots.find((s: any) => s.id === sSnap.id);
+						if (spot) spot.shape = sSnap.shape;
+					}
+				}
+			}
+		} else if (editModeTarget.type === 'area') {
+			const area = zone.areas.find((a: any) => a.id === (editModeTarget as any).areaId);
+			if (area) {
+				area.shape = snap.shape;
+				for (const sSnap of snap.spots) {
+					const spot = area.spots.find((s: any) => s.id === sSnap.id);
+					if (spot) spot.shape = sSnap.shape;
+				}
+			}
+		} else {
+			const area = zone.areas.find((a: any) => a.id === (editModeTarget as any).areaId);
+			const spot = area?.spots.find((s: any) => s.id === (editModeTarget as any).spotId);
+			if (spot) spot.shape = snap.shape;
+		}
+
+		venue = { ...venue };
+		deselectEditModeItem();
+		renderEditModeShapes();
+	}
+
+	function undo() {
+		if (!editModeTarget || undoStack.length === 0) return;
+		const currentSnap = snapshotEditModeShapes(editModeTarget);
+		if (currentSnap) {
+			redoStack.push(currentSnap);
+			redoStack = redoStack;
+		}
+		const snap = undoStack.pop()!;
+		undoStack = undoStack;
+		applySnapshot(snap);
+	}
+
+	function redo() {
+		if (!editModeTarget || redoStack.length === 0) return;
+		const currentSnap = snapshotEditModeShapes(editModeTarget);
+		if (currentSnap) {
+			undoStack.push(currentSnap);
+			undoStack = undoStack;
+		}
+		const snap = redoStack.pop()!;
+		redoStack = redoStack;
+		applySnapshot(snap);
+	}
+
 	function saveEditModeShapesToData() {
 		if (!editModeTarget || !editModeLayer) return;
+		pushUndoSnapshot();
 		const converter = getGeoConverter();
 		const entity = getEditModeEntity();
 		if (!entity) return;
@@ -1097,6 +1259,8 @@
 		if (!editModeLayer) return;
 		editModeLayer.pm.enable({ allowSelfIntersection: false });
 		requestAnimationFrame(() => setupShapeDragOnPath());
+		selectedVertexMarker = null;
+		hookVertexMarkerClicks();
 		repositionShapeEdgeMarkers();
 		const p = getShapeRotateHandlePos();
 		if (p && shapeRotateMarker) shapeRotateMarker.setLatLng(p);
@@ -1111,6 +1275,7 @@
 	}
 
 	function deselectEditModeItem() {
+		selectedVertexMarker = null;
 		if (editModeSelection === 'shape' && editModeLayer) {
 			editModeLayer.off('pm:edit');
 			editModeLayer.pm.disable();
@@ -1238,6 +1403,7 @@
 		editModeTarget = null;
 		editModeLayer = null;
 		editModeOriginalShapes = null;
+		oneditchange(null);
 
 		// Re-add tile layer and floor background
 		if (tileLayerRef && map) tileLayerRef.addTo(map);
@@ -1353,6 +1519,24 @@
 		}
 	}
 
+	function onRedrawVertexAdded(e: any) {
+		if (!redrawActive || !map) return;
+		const marker = e.marker;
+		const workingLayer = e.workingLayer;
+		if (!marker || !workingLayer) return;
+
+		marker.options.draggable = true;
+		if (marker.dragging) marker.dragging.enable();
+
+		marker.on('drag', () => {
+			const drawMode = map.pm.Draw.Polygon;
+			if (drawMode?._markers) {
+				const latlngs = drawMode._markers.map((m: any) => m.getLatLng());
+				workingLayer.setLatLngs(latlngs);
+			}
+		});
+	}
+
 	function startRedraw() {
 		if (!editModeLayer || !map) return;
 		const entity = getEditModeEntity();
@@ -1381,6 +1565,9 @@
 			}
 		});
 
+		// Allow dragging already-placed vertices during draw
+		map.on('pm:vertexadded', onRedrawVertexAdded);
+
 		redrawActive = true;
 	}
 
@@ -1389,6 +1576,7 @@
 
 		// Stop drawing
 		map.pm.disableDraw();
+		map.off('pm:vertexadded', onRedrawVertexAdded);
 
 		// Restore original layer visibility
 		if (redrawOriginalLayer) {
@@ -1414,6 +1602,7 @@
 
 	function completeRedraw(newLayer: any) {
 		if (!map || !editModeTarget) return;
+		map.off('pm:vertexadded', onRedrawVertexAdded);
 
 		// Extract shape from the newly drawn layer
 		let newShape = layerToShapeDef(newLayer);
@@ -2308,6 +2497,11 @@
 	}
 
 	function handleKeydown(e: KeyboardEvent) {
+		if (editMode && (e.metaKey || e.ctrlKey) && e.key === 'z') {
+			e.preventDefault();
+			if (e.shiftKey) { redo(); } else { undo(); }
+			return;
+		}
 		if (e.key === 'Escape') {
 			if (redrawActive) { cancelRedraw(); return; }
 			if (editMode) return; // Edit mode only closes via Done button
@@ -2616,7 +2810,7 @@
 				zoomControl: false
 			});
 
-			L.control.zoom({ position: 'bottomright' }).addTo(map);
+			L.control.zoom({ position: 'topright' }).addTo(map);
 
 			// Add map tiles (CartoDB Positron — fast CDN-backed tiles)
 			tileLayerRef = L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
@@ -2677,7 +2871,7 @@
 			map = L.map(mapContainer, {
 				crs: YDownCRS,
 				minZoom: -2,
-				maxZoom: 4,
+				maxZoom: 40,
 				zoomSnap: 0.25
 			});
 
@@ -2708,6 +2902,10 @@
 			rotateMode: false
 		});
 		map.pm.removeControls();
+
+		// Disable snapping globally — prevents circles/shapes from snapping to
+		// other layers' edges during drag, which causes the "straight line" glitch
+		map.pm.setGlobalOptions({ snappable: false });
 
 		// Listen for shape creation
 		map.on('pm:create', (e: any) => {
@@ -2750,10 +2948,19 @@
 		});
 
 		renderExistingShapes();
+
+		// Auto-enter edit mode if initialEditTarget was provided
+		if (initialEditTarget) {
+			setTimeout(() => {
+				enterEditModeForTarget(initialEditTarget);
+			}, 100);
+		}
 	}
 
 	onMount(() => {
 		editModeShowMap = localStorage.getItem('mapEditor:showMap') === 'true';
+		const savedVertexSize = localStorage.getItem('mapEditor:vertexSize');
+		if (savedVertexSize) vertexSize = parseFloat(savedVertexSize);
 
 		// Dynamically import Leaflet to avoid SSR issues
 		const linkEl = document.createElement('link');
@@ -2859,7 +3066,7 @@
 	{/if}
 
 	<div class="map-area-wrapper">
-		<div class="map-area" bind:this={mapContainer}></div>
+		<div class="map-area" bind:this={mapContainer} style="--vertex-size: {vertexSize}px;"></div>
 
 		<div class="fab-column" bind:this={fabColumnEl}>
 			{#if venueGeoBounds}
@@ -2890,6 +3097,45 @@
 				</button>
 			{/if}
 		</div>
+
+		{#if editMode && selectedVertexMarker}
+			<div class="fab-center-bottom">
+				<button class="vertex-delete-btn" onclick={(e) => { e.stopPropagation(); deleteSelectedVertex(); }}>
+					<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+						<polyline points="3 6 5 6 21 6"></polyline>
+						<path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+					</svg>
+					Delete Vertex
+				</button>
+			</div>
+		{/if}
+
+		{#if editMode}
+			<div class="fab-row-bottom-right">
+				<button
+					class="map-fab"
+					onclick={(e) => { e.stopPropagation(); undo(); }}
+					title="Undo"
+					disabled={!canUndo}
+				>
+					<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+						<polyline points="1 4 1 10 7 10"></polyline>
+						<path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"></path>
+					</svg>
+				</button>
+				<button
+					class="map-fab"
+					onclick={(e) => { e.stopPropagation(); redo(); }}
+					title="Redo"
+					disabled={!canRedo}
+				>
+					<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+						<polyline points="23 4 23 10 17 10"></polyline>
+						<path d="M20.49 15a9 9 0 1 1-2.13-9.36L23 10"></path>
+					</svg>
+				</button>
+			</div>
+		{/if}
 
 		{#if !editMode && toolbarPosition && editingTarget && !isDragging}
 			{@const editingEntity = getEditingEntity()}
@@ -3088,6 +3334,11 @@
 						<button class="zt-btn sp-btn-reset" onclick={resetEditModeShapes}>Reset Shape</button>
 					</div>
 				{/if}
+				<div class="sp-style-row" style="margin-top: 8px;">
+					<span class="sp-section-label" style="margin-bottom: 0; font-size: 11px;">Vertex Size</span>
+					<input type="range" class="zt-range sp-range-full" min="20" max="50" step="1" bind:value={vertexSize} oninput={() => localStorage.setItem('mapEditor:vertexSize', String(vertexSize))} />
+					<span class="zt-range-val">{vertexSize}</span>
+				</div>
 			</div>
 
 			<div class="sp-section sp-section-overlay">
@@ -3672,6 +3923,49 @@
 		background: #4338ca;
 	}
 
+	.map-fab:disabled {
+		opacity: 0.35;
+		cursor: default;
+		pointer-events: none;
+	}
+
+	.fab-row-bottom-right {
+		position: absolute;
+		bottom: 16px;
+		right: 16px;
+		z-index: 500;
+		display: flex;
+		flex-direction: row;
+		gap: 8px;
+		pointer-events: none;
+	}
+
+	.fab-center-bottom {
+		position: absolute;
+		bottom: 16px;
+		left: 50%;
+		transform: translateX(-50%);
+		z-index: 500;
+	}
+	.vertex-delete-btn {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		padding: 8px 16px;
+		background: #ef4444;
+		color: #fff;
+		border: none;
+		border-radius: 8px;
+		font-size: 13px;
+		font-weight: 600;
+		cursor: pointer;
+		box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+		transition: background 0.15s;
+	}
+	.vertex-delete-btn:hover {
+		background: #dc2626;
+	}
+
 	/* Zone floating toolbar */
 	.zone-toolbar {
 		position: absolute;
@@ -4178,6 +4472,15 @@
 	}
 	:global(.shape-edge-handle:hover) {
 		background: #0ea5e9;
+	}
+
+	/* Geoman vertex marker sizing via CSS variable */
+	:global(.map-area .marker-icon) {
+		width: var(--vertex-size, 10px) !important;
+		height: var(--vertex-size, 10px) !important;
+		margin-left: calc(var(--vertex-size, 10px) / -2) !important;
+		margin-top: calc(var(--vertex-size, 10px) / -2) !important;
+		border-radius: 50%;
 	}
 
 </style>

@@ -1,8 +1,26 @@
 <script lang="ts">
 	import { page } from '$app/stores';
+	import { goto } from '$app/navigation';
 	import { base } from '$app/paths';
+	import { onMount } from 'svelte';
 
 	let { children } = $props();
+
+	// Persist current page
+	$effect(() => {
+		const path = $page.url.pathname;
+		if (path && path !== `${base}/` && path !== base) {
+			localStorage.setItem('poc-map-last-page', path);
+		}
+	});
+
+	onMount(() => {
+		const path = $page.url.pathname;
+		if (path === `${base}/` || path === base || path === `${base}`) {
+			const saved = localStorage.getItem('poc-map-last-page');
+			if (saved) goto(saved);
+		}
+	});
 
 	const navLinks = [
 		{ href: `${base}/`, label: 'Home', icon: '🏠' },

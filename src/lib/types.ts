@@ -63,6 +63,11 @@ export interface Venue {
 	zones: Zone[];
 }
 
+export type EditingTarget =
+	| { type: 'zone'; zoneId: string }
+	| { type: 'area'; zoneId: string; areaId: string }
+	| { type: 'spot'; zoneId: string; areaId: string; spotId: string };
+
 export const CATEGORY_COLORS: Record<POICategory, string> = {
 	food: '#f97316',
 	attraction: '#8b5cf6',
