@@ -3,6 +3,7 @@
 	import type { Venue, Zone, Area, Spot, ShapeDef, ShapeStyle, POICategory } from '$lib/types.ts';
 	import { CATEGORY_COLORS } from '$lib/types.ts';
 	import { createGeoConverter, type GeoConverter } from '$lib/geoConvert.ts';
+	import { saveOverlay, loadOverlay, clearOverlayStorage } from '$lib/storage.ts';
 
 	let {
 		venue = $bindable(),
@@ -67,10 +68,14 @@
 	let editModeSelection = $state<'shape' | 'overlay' | null>(null);
 	let shapeRotateMarker: any = null;
 	let shapeDragHandlers: any = null;
+	let shapeRotateEdgeIdx: [number, number] | null = null;
 
 	// Redraw shape state
 	let redrawActive = $state(false);
 	let redrawOriginalLayer: any = null;
+
+	// Original shape snapshot for reset
+	let editModeOriginalShapes: any = null;
 
 	// Edit mode map visibility (persisted)
 	let editModeShowMap = $state(false);
@@ -82,6 +87,7 @@
 	let overlayRotation = $state(0);
 	let overlayCornerMarkers: any[] = [];
 	let overlayRotateMarker: any = null;
+	let overlaySelectionRect: any = null;
 	let overlayDragState: { dragging: boolean; startLatLng: any } | null = null;
 	let overlayDragHandlers: { mousedown: any; mousemove: any; mouseup: any } | null = null;
 
@@ -399,6 +405,69 @@
 		return area?.spots.find(s => s.id === (editModeTarget as any).spotId);
 	}
 
+	function snapshotEditModeShapes(target: EditingTarget) {
+		const zone = venue.zones.find(z => z.id === target.zoneId);
+		if (!zone) return null;
+		if (target.type === 'zone') {
+			return JSON.parse(JSON.stringify({
+				shape: zone.shape,
+				areas: zone.areas.map(a => ({
+					id: a.id, shape: a.shape,
+					spots: a.spots.map(s => ({ id: s.id, shape: s.shape }))
+				}))
+			}));
+		} else if (target.type === 'area') {
+			const area = zone.areas.find(a => a.id === target.areaId);
+			if (!area) return null;
+			return JSON.parse(JSON.stringify({
+				shape: area.shape,
+				spots: area.spots.map(s => ({ id: s.id, shape: s.shape }))
+			}));
+		} else {
+			const area = zone.areas.find(a => a.id === target.areaId);
+			const spot = area?.spots.find(s => s.id === target.spotId);
+			if (!spot) return null;
+			return JSON.parse(JSON.stringify({ shape: spot.shape }));
+		}
+	}
+
+	function resetEditModeShapes() {
+		if (!editModeTarget || !editModeOriginalShapes) return;
+		const zone = venue.zones.find(z => z.id === editModeTarget.zoneId);
+		if (!zone) return;
+
+		if (editModeTarget.type === 'zone') {
+			zone.shape = editModeOriginalShapes.shape;
+			for (const aSnap of editModeOriginalShapes.areas) {
+				const area = zone.areas.find(a => a.id === aSnap.id);
+				if (area) {
+					area.shape = aSnap.shape;
+					for (const sSnap of aSnap.spots) {
+						const spot = area.spots.find(s => s.id === sSnap.id);
+						if (spot) spot.shape = sSnap.shape;
+					}
+				}
+			}
+		} else if (editModeTarget.type === 'area') {
+			const area = zone.areas.find(a => a.id === (editModeTarget as any).areaId);
+			if (area) {
+				area.shape = editModeOriginalShapes.shape;
+				for (const sSnap of editModeOriginalShapes.spots) {
+					const spot = area.spots.find(s => s.id === sSnap.id);
+					if (spot) spot.shape = sSnap.shape;
+				}
+			}
+		} else {
+			const area = zone.areas.find(a => a.id === (editModeTarget as any).areaId);
+			const spot = area?.spots.find(s => s.id === (editModeTarget as any).spotId);
+			if (spot) spot.shape = editModeOriginalShapes.shape;
+		}
+
+		venue = { ...venue };
+		deselectEditModeItem();
+		renderEditModeShapes();
+	}
+
 	function enterEditMode() {
 		if (!editingTarget) return;
 		const target = { ...editingTarget } as EditingTarget;
@@ -414,6 +483,9 @@
 
 		editModeTarget = target;
 		editMode = true;
+
+		// Snapshot original shapes for reset
+		editModeOriginalShapes = snapshotEditModeShapes(target);
 
 		// Hide Geoman drawing controls (not useful in edit mode)
 		map.pm.removeControls();
@@ -446,6 +518,15 @@
 		// Render only the target entity
 		renderEditModeShapes();
 
+		// Restore saved overlay
+		const savedOverlay = loadOverlay(venue.id);
+		if (savedOverlay) {
+			overlayImageUrl = savedOverlay.imageDataUrl;
+			overlayOpacity = savedOverlay.opacity;
+			overlayRotation = savedOverlay.rotation;
+			addOverlayToMap(savedOverlay.bounds);
+		}
+
 		// Invalidate map size since the container changed, then fit
 		setTimeout(() => {
 			map?.invalidateSize();
@@ -472,6 +553,7 @@
 			setupShapeDragOnPath();
 			createShapeRotateMarker();
 		} else if (item === 'overlay') {
+			createOverlaySelectionRect();
 			createOverlayCornerMarkers();
 		}
 		editModeSelection = item;
@@ -612,15 +694,51 @@
 		if (!editModeLayer || !map) return null;
 		const L = (window as any).L;
 		const bounds = editModeLayer.getBounds();
-		const ne = bounds.getNorthEast();
-		const nePt = map.latLngToContainerPoint(ne);
 		const center = bounds.getCenter();
 		const centerPt = map.latLngToContainerPoint(center);
-		const dx = nePt.x - centerPt.x;
-		const dy = nePt.y - centerPt.y;
-		const dist = Math.sqrt(dx * dx + dy * dy);
-		if (dist === 0) return null;
-		const offsetPt = L.point(nePt.x + (dx / dist) * 30, nePt.y + (dy / dist) * 30);
+
+		// For polygons: pin to the bottom edge and follow it during rotation
+		if (typeof editModeLayer.getLatLngs === 'function') {
+			const latlngs = editModeLayer.getLatLngs();
+			const ring: any[] = Array.isArray(latlngs[0]) ? latlngs[0] : latlngs;
+
+			if (ring && ring.length >= 2) {
+				// Determine which edge is "bottom" on first call, then keep it pinned
+				if (!shapeRotateEdgeIdx || shapeRotateEdgeIdx[0] >= ring.length) {
+					let bestY = -Infinity;
+					let bestEdge: [number, number] = [0, 1];
+					for (let i = 0; i < ring.length; i++) {
+						const j = (i + 1) % ring.length;
+						const p1 = map.latLngToContainerPoint(ring[i]);
+						const p2 = map.latLngToContainerPoint(ring[j]);
+						const midY = (p1.y + p2.y) / 2;
+						if (midY > bestY) {
+							bestY = midY;
+							bestEdge = [i, j];
+						}
+					}
+					shapeRotateEdgeIdx = bestEdge;
+				}
+
+				const [ei, ej] = shapeRotateEdgeIdx;
+				if (ei < ring.length && ej < ring.length) {
+					const p1 = map.latLngToContainerPoint(ring[ei]);
+					const p2 = map.latLngToContainerPoint(ring[ej]);
+					const midPt = L.point((p1.x + p2.x) / 2, (p1.y + p2.y) / 2);
+					const dx = midPt.x - centerPt.x;
+					const dy = midPt.y - centerPt.y;
+					const dist = Math.sqrt(dx * dx + dy * dy);
+					if (dist > 0) {
+						const offsetPt = L.point(midPt.x + (dx / dist) * 30, midPt.y + (dy / dist) * 30);
+						return map.containerPointToLatLng(offsetPt);
+					}
+				}
+			}
+		}
+
+		// Fallback for circles: bottom of bounds, offset 30px down
+		const southPt = map.latLngToContainerPoint(L.latLng(bounds.getSouth(), center.lng));
+		const offsetPt = L.point(southPt.x, southPt.y + 30);
 		return map.containerPointToLatLng(offsetPt);
 	}
 
@@ -820,6 +938,7 @@
 	}
 
 	function removeShapeRotateMarker() {
+		shapeRotateEdgeIdx = null;
 		if (shapeRotateMarker && map) {
 			if ((shapeRotateMarker as any)._rotateCleanup) {
 				(shapeRotateMarker as any)._rotateCleanup();
@@ -845,6 +964,7 @@
 			}
 		} else if (editModeSelection === 'overlay') {
 			removeOverlayCornerMarkers();
+			removeOverlaySelectionRect();
 			removeOverlayDragHandlers();
 		}
 		editModeSelection = null;
@@ -944,12 +1064,17 @@
 			}
 		}
 
-		// Remove image overlay
-		clearOverlay();
+		// Remove image overlay from map (but keep persisted data)
+		if (editModeSelection === 'overlay') editModeSelection = null;
+		removeOverlayFromMap();
+		overlayImageUrl = '';
+		overlayOpacity = 0.5;
+		overlayRotation = 0;
 
 		editMode = false;
 		editModeTarget = null;
 		editModeLayer = null;
+		editModeOriginalShapes = null;
 
 		// Re-add tile layer and floor background
 		if (tileLayerRef && map) tileLayerRef.addTo(map);
@@ -1166,26 +1291,34 @@
 		const input = e.target as HTMLInputElement;
 		const file = input.files?.[0];
 		if (!file) return;
-		const url = URL.createObjectURL(file);
-		overlayImageUrl = url;
-		addOverlayToMap();
+		const reader = new FileReader();
+		reader.onload = () => {
+			overlayImageUrl = reader.result as string;
+			addOverlayToMap();
+			persistOverlay();
+		};
+		reader.readAsDataURL(file);
 	}
 
-	function addOverlayToMap() {
+	function addOverlayToMap(savedBounds?: [[number, number], [number, number]]) {
 		if (!map || !overlayImageUrl) return;
 		removeOverlayFromMap();
 
 		const L = (window as any).L;
-		const converter = getGeoConverter();
 		let bounds: any;
 
-		if (converter && venue.geoBounds) {
-			bounds = L.latLngBounds(
-				[venue.geoBounds.sw[0], venue.geoBounds.sw[1]],
-				[venue.geoBounds.ne[0], venue.geoBounds.ne[1]]
-			);
+		if (savedBounds) {
+			bounds = L.latLngBounds(savedBounds[0], savedBounds[1]);
 		} else {
-			bounds = [[0, 0], [venue.height, venue.width]];
+			const converter = getGeoConverter();
+			if (converter && venue.geoBounds) {
+				bounds = L.latLngBounds(
+					[venue.geoBounds.sw[0], venue.geoBounds.sw[1]],
+					[venue.geoBounds.ne[0], venue.geoBounds.ne[1]]
+				);
+			} else {
+				bounds = [[0, 0], [venue.height, venue.width]];
+			}
 		}
 
 		overlayLayer = L.imageOverlay(overlayImageUrl, bounds, {
@@ -1204,6 +1337,7 @@
 	function updateOverlayOpacity() {
 		if (overlayLayer) {
 			overlayLayer.setOpacity(overlayOpacity);
+			persistOverlay();
 		}
 	}
 
@@ -1224,6 +1358,21 @@
 		overlayImageUrl = '';
 		overlayOpacity = 0.5;
 		overlayRotation = 0;
+		clearOverlayStorage(venue.id);
+	}
+
+	function persistOverlay() {
+		if (!overlayImageUrl || !overlayLayer) return;
+		const bounds = overlayLayer.getBounds();
+		saveOverlay(venue.id, {
+			imageDataUrl: overlayImageUrl,
+			opacity: overlayOpacity,
+			rotation: overlayRotation,
+			bounds: [
+				[bounds.getSouth(), bounds.getWest()],
+				[bounds.getNorth(), bounds.getEast()]
+			]
+		});
 	}
 
 	function getRotatedOverlayCorners(): any[] {
@@ -1254,18 +1403,51 @@
 		const L = (window as any).L;
 		const rotatedCorners = getRotatedOverlayCorners();
 		if (rotatedCorners.length < 4) return null;
-		const ne = rotatedCorners[2]; // rotated NE corner
+		// Bottom edge midpoint: average of SW (index 0) and SE (index 1)
+		const sw = rotatedCorners[0];
+		const se = rotatedCorners[1];
+		const swPt = map.latLngToContainerPoint(sw);
+		const sePt = map.latLngToContainerPoint(se);
+		const midPt = L.point((swPt.x + sePt.x) / 2, (swPt.y + sePt.y) / 2);
 		const bounds = overlayLayer.getBounds();
 		const center = bounds.getCenter();
 		const centerPt = map.latLngToContainerPoint(center);
-		const nePt = map.latLngToContainerPoint(ne);
-		// Offset 30px outward from center through the NE corner
-		const dx = nePt.x - centerPt.x;
-		const dy = nePt.y - centerPt.y;
+		// Offset 30px outward from center through the bottom edge midpoint
+		const dx = midPt.x - centerPt.x;
+		const dy = midPt.y - centerPt.y;
 		const dist = Math.sqrt(dx * dx + dy * dy);
 		if (dist === 0) return null;
-		const offsetPoint = L.point(nePt.x + (dx / dist) * 30, nePt.y + (dy / dist) * 30);
+		const offsetPoint = L.point(midPt.x + (dx / dist) * 30, midPt.y + (dy / dist) * 30);
 		return map.containerPointToLatLng(offsetPoint);
+	}
+
+	function createOverlaySelectionRect() {
+		if (!overlayLayer || !map) return;
+		removeOverlaySelectionRect();
+		const L = (window as any).L;
+		const corners = getRotatedOverlayCorners();
+		if (corners.length < 4) return;
+		overlaySelectionRect = L.polygon(corners, {
+			weight: 2,
+			dashArray: '6 4',
+			color: '#facc15',
+			fill: false,
+			interactive: false
+		}).addTo(map);
+	}
+
+	function updateOverlaySelectionRect() {
+		if (!overlaySelectionRect) return;
+		const corners = getRotatedOverlayCorners();
+		if (corners.length < 4) return;
+		overlaySelectionRect.setLatLngs(corners);
+	}
+
+	function removeOverlaySelectionRect() {
+		if (overlaySelectionRect && map) {
+			map.removeLayer(overlaySelectionRect);
+			overlaySelectionRect = null;
+		}
 	}
 
 	function createOverlayCornerMarkers() {
@@ -1292,23 +1474,22 @@
 			overlayCornerMarkers.push(marker);
 		}
 
-		// Rotation handle — offset from NE corner
+		// Rotation handle — offset from bottom edge
 		const rotatePos = getOverlayRotateHandlePos();
 		if (rotatePos) {
 			const rotateIcon = L.divIcon({
-				className: 'overlay-rotate-handle',
-				iconSize: [20, 20],
-				iconAnchor: [10, 10]
+				className: 'shape-rotate-handle',
+				iconSize: [32, 32],
+				iconAnchor: [16, 16]
 			});
 			overlayRotateMarker = L.marker(rotatePos, {
 				icon: rotateIcon,
-				draggable: true,
+				draggable: false,
+				interactive: true,
 				zIndexOffset: 10001
 			}).addTo(map);
 
-			overlayRotateMarker.on('drag', () => {
-				handleRotateHandleDrag(overlayRotateMarker.getLatLng());
-			});
+			setupOverlayRotateHandler();
 		}
 
 		// Set up drag handlers for the overlay body
@@ -1362,6 +1543,7 @@
 			const pos = getOverlayRotateHandlePos();
 			if (pos) overlayRotateMarker.setLatLng(pos);
 		}
+		updateOverlaySelectionRect();
 	}
 
 	function handleCornerDragEnd() {
@@ -1378,31 +1560,85 @@
 			const pos = getOverlayRotateHandlePos();
 			if (pos) overlayRotateMarker.setLatLng(pos);
 		}
+		updateOverlaySelectionRect();
+		persistOverlay();
 	}
 
-	function handleRotateHandleDrag(handleLatLng: any) {
-		if (!overlayLayer || !map) return;
-		const bounds = overlayLayer.getBounds();
-		const center = bounds.getCenter();
-		const centerPt = map.latLngToContainerPoint(center);
-		const handlePt = map.latLngToContainerPoint(handleLatLng);
-		// Angle from center to handle in screen coords (0° = up/north, clockwise)
-		const dx = handlePt.x - centerPt.x;
-		const dy = handlePt.y - centerPt.y;
-		// atan2 gives angle from positive X axis; we want angle from positive Y-up (north)
-		// In screen coords Y is inverted, so "up" is negative Y
-		let angle = Math.atan2(dx, -dy) * (180 / Math.PI);
-		if (angle < 0) angle += 360;
-		overlayRotation = Math.round(angle);
-		applyOverlayRotation();
+	function setupOverlayRotateHandler() {
+		if (!overlayRotateMarker || !map || !overlayLayer) return;
+		const L = (window as any).L;
 
-		// Reposition corner markers at new rotated positions
-		const updatedCorners = getRotatedOverlayCorners();
-		for (let i = 0; i < 4; i++) {
-			if (overlayCornerMarkers[i]) {
-				overlayCornerMarkers[i].setLatLng(updatedCorners[i]);
+		let rotating = false;
+		let centerPt: any = null;
+
+		const onRotateDown = (e: any) => {
+			if (!overlayLayer || editModeSelection !== 'overlay') return;
+			e.stopPropagation();
+			e.preventDefault();
+			map.dragging.disable();
+			rotating = true;
+
+			const bounds = overlayLayer.getBounds();
+			centerPt = map.latLngToContainerPoint(bounds.getCenter());
+		};
+
+		const onMouseMove = (e: any) => {
+			if (!rotating || !centerPt || !overlayLayer) return;
+			const touch = e.touches ? e.touches[0] : e;
+			if (!touch) return;
+			const container = map.getContainer();
+			const containerRect = container.getBoundingClientRect();
+			const mx = touch.clientX - containerRect.left;
+			const my = touch.clientY - containerRect.top;
+
+			const dx = mx - centerPt.x;
+			const dy = my - centerPt.y;
+			let angle = Math.atan2(dx, -dy) * (180 / Math.PI);
+			if (angle < 0) angle += 360;
+			overlayRotation = Math.round(angle);
+			applyOverlayRotation();
+
+			// Reposition corner markers at new rotated positions
+			const updatedCorners = getRotatedOverlayCorners();
+			for (let i = 0; i < 4; i++) {
+				if (overlayCornerMarkers[i]) {
+					overlayCornerMarkers[i].setLatLng(updatedCorners[i]);
+				}
 			}
+			// Reposition rotate handle at bottom edge
+			const pos = getOverlayRotateHandlePos();
+			if (pos && overlayRotateMarker) overlayRotateMarker.setLatLng(pos);
+			updateOverlaySelectionRect();
+		};
+
+		const onMouseUp = () => {
+			if (!rotating) return;
+			rotating = false;
+			centerPt = null;
+			map.dragging.enable();
+			persistOverlay();
+		};
+
+		const markerEl = overlayRotateMarker.getElement();
+		if (markerEl) {
+			markerEl.addEventListener('mousedown', onRotateDown, true);
+			markerEl.addEventListener('touchstart', onRotateDown, true);
 		}
+		window.addEventListener('mousemove', onMouseMove);
+		window.addEventListener('mouseup', onMouseUp);
+		window.addEventListener('touchmove', onMouseMove as any);
+		window.addEventListener('touchend', onMouseUp);
+
+		(overlayRotateMarker as any)._rotateCleanup = () => {
+			if (markerEl) {
+				markerEl.removeEventListener('mousedown', onRotateDown, true);
+				markerEl.removeEventListener('touchstart', onRotateDown, true);
+			}
+			window.removeEventListener('mousemove', onMouseMove);
+			window.removeEventListener('mouseup', onMouseUp);
+			window.removeEventListener('touchmove', onMouseMove as any);
+			window.removeEventListener('touchend', onMouseUp);
+		};
 	}
 
 	function removeOverlayCornerMarkers() {
@@ -1411,6 +1647,9 @@
 		}
 		overlayCornerMarkers = [];
 		if (overlayRotateMarker && map) {
+			if ((overlayRotateMarker as any)._rotateCleanup) {
+				(overlayRotateMarker as any)._rotateCleanup();
+			}
 			map.removeLayer(overlayRotateMarker);
 			overlayRotateMarker = null;
 		}
@@ -1420,32 +1659,46 @@
 		if (!map || !overlayLayer) return;
 		removeOverlayDragHandlers();
 
-		const container = map.getContainer();
 		const L = (window as any).L;
+		const imgEl = overlayLayer.getElement();
+		if (!imgEl) return;
 
-		const onMouseDown = (e: MouseEvent) => {
+		// The <img> sits below the SVG renderer in leaflet-overlay-pane,
+		// so shape paths capture mousedown before it reaches the image.
+		// Raise the <img> above the SVG so it receives events first.
+		imgEl.style.zIndex = '9999';
+		imgEl.style.position = 'relative';
+		imgEl.style.cursor = 'grab';
+		imgEl.style.pointerEvents = 'auto';
+
+		// Prevent Leaflet from initiating map drag when mousedown is on the image.
+		L.DomEvent.disableClickPropagation(imgEl);
+
+		const onImgDown = (e: any) => {
 			if (!overlayLayer || editModeSelection !== 'overlay') return;
-			// Ignore if click is on a handle marker
-			const target = e.target as HTMLElement;
-			if (target.closest('.overlay-corner-handle') || target.closest('.overlay-rotate-handle')) return;
 
+			// Stop propagation at DOM level AND Leaflet level
+			e.stopPropagation();
+			e.preventDefault();
+			map.dragging.disable();
+
+			const touch = e.touches ? e.touches[0] : e;
+			const container = map.getContainer();
 			const containerRect = container.getBoundingClientRect();
-			const containerPoint = L.point(e.clientX - containerRect.left, e.clientY - containerRect.top);
+			const containerPoint = L.point(touch.clientX - containerRect.left, touch.clientY - containerRect.top);
 			const latlng = map.containerPointToLatLng(containerPoint);
 
-			if (!overlayLayer.getBounds().contains(latlng)) return;
-
-			e.preventDefault();
-			e.stopPropagation();
-			map.dragging.disable();
 			overlayDragState = { dragging: true, startLatLng: latlng };
 		};
 
-		const onMouseMove = (e: MouseEvent) => {
+		const onMouseMove = (e: any) => {
 			if (!overlayDragState?.dragging || !overlayLayer) return;
+			const touch = e.touches ? e.touches[0] : e;
+			if (!touch) return;
 
+			const container = map.getContainer();
 			const containerRect = container.getBoundingClientRect();
-			const containerPoint = L.point(e.clientX - containerRect.left, e.clientY - containerRect.top);
+			const containerPoint = L.point(touch.clientX - containerRect.left, touch.clientY - containerRect.top);
 			const currentLatLng = map.containerPointToLatLng(containerPoint);
 
 			const dlat = currentLatLng.lat - overlayDragState.startLatLng.lat;
@@ -1471,6 +1724,7 @@
 				const pos = getOverlayRotateHandlePos();
 				if (pos) overlayRotateMarker.setLatLng(pos);
 			}
+			updateOverlaySelectionRect();
 
 			overlayDragState.startLatLng = currentLatLng;
 		};
@@ -1479,21 +1733,37 @@
 			if (!overlayDragState?.dragging) return;
 			overlayDragState = null;
 			map.dragging.enable();
+			persistOverlay();
 		};
 
-		container.addEventListener('mousedown', onMouseDown);
+		imgEl.addEventListener('mousedown', onImgDown);
+		imgEl.addEventListener('touchstart', onImgDown);
 		window.addEventListener('mousemove', onMouseMove);
 		window.addEventListener('mouseup', onMouseUp);
+		window.addEventListener('touchmove', onMouseMove as any);
+		window.addEventListener('touchend', onMouseUp);
 
-		overlayDragHandlers = { mousedown: onMouseDown, mousemove: onMouseMove, mouseup: onMouseUp };
+		overlayDragHandlers = { mousedown: onImgDown, mousemove: onMouseMove, mouseup: onMouseUp };
 	}
 
 	function removeOverlayDragHandlers() {
-		if (!overlayDragHandlers || !map) return;
-		const container = map.getContainer();
-		container.removeEventListener('mousedown', overlayDragHandlers.mousedown);
+		if (!overlayDragHandlers) return;
+		if (overlayLayer) {
+			const imgEl = overlayLayer.getElement();
+			if (imgEl) {
+				// Restore z-index so image goes back behind shapes
+				imgEl.style.zIndex = '';
+				imgEl.style.position = '';
+				imgEl.style.cursor = '';
+				imgEl.style.pointerEvents = '';
+				imgEl.removeEventListener('mousedown', overlayDragHandlers.mousedown);
+				imgEl.removeEventListener('touchstart', overlayDragHandlers.mousedown);
+			}
+		}
 		window.removeEventListener('mousemove', overlayDragHandlers.mousemove);
 		window.removeEventListener('mouseup', overlayDragHandlers.mouseup);
+		window.removeEventListener('touchmove', overlayDragHandlers.mousemove as any);
+		window.removeEventListener('touchend', overlayDragHandlers.mouseup);
 		overlayDragHandlers = null;
 		overlayDragState = null;
 	}
@@ -1520,6 +1790,7 @@
 
 	function updateOverlayRotation() {
 		applyOverlayRotation();
+		persistOverlay();
 	}
 
 	function computeShapeDelta(oldShape: ShapeDef, newShape: ShapeDef): { dx: number; dy: number } {
@@ -2408,7 +2679,10 @@
 					<div class="sp-redraw-hint">Click on map to draw a new polygon. Press Escape to cancel.</div>
 					<button class="zt-btn" onclick={cancelRedraw}>Cancel Redraw</button>
 				{:else}
-					<button class="zt-btn" onclick={startRedraw}>Redraw Shape</button>
+					<div class="sp-shape-actions">
+						<button class="zt-btn" onclick={startRedraw}>Redraw Shape</button>
+						<button class="zt-btn sp-btn-reset" onclick={resetEditModeShapes}>Reset Shape</button>
+					</div>
 				{/if}
 			</div>
 
@@ -2424,12 +2698,7 @@
 						<input type="range" class="zt-range sp-range-full" min="0" max="1" step="0.05" bind:value={overlayOpacity} oninput={updateOverlayOpacity} />
 						<span class="zt-range-val">{overlayOpacity.toFixed(2)}</span>
 					</div>
-					<div class="sp-style-row">
-						<span class="sp-overlay-label">Rotate</span>
-						<input type="range" class="zt-range sp-range-full" min="0" max="360" step="1" bind:value={overlayRotation} oninput={updateOverlayRotation} />
-						<span class="zt-range-val">{overlayRotation}&deg;</span>
-					</div>
-				{:else}
+					{:else}
 					<label class="sp-overlay-upload">
 						<input type="file" accept="image/*" onchange={handleOverlayFile} hidden />
 						<span class="zt-btn sp-overlay-btn">Choose Image</span>
@@ -2922,6 +3191,21 @@
 		width: 100%;
 	}
 
+	.sp-shape-actions {
+		display: flex;
+		gap: 8px;
+	}
+	.sp-shape-actions .zt-btn {
+		flex: 1;
+	}
+	.sp-btn-reset {
+		background: #374151 !important;
+		color: #d1d5db !important;
+	}
+	.sp-btn-reset:hover {
+		background: #4b5563 !important;
+	}
+
 	.sp-redraw-hint {
 		font-size: 13px;
 		color: #fbbf24;
@@ -3387,31 +3671,6 @@
 	:global(.overlay-corner-handle:hover) {
 		background: #fbbf24;
 		transform: scale(1.3);
-	}
-
-	:global(.overlay-rotate-handle) {
-		width: 20px !important;
-		height: 20px !important;
-		background: #38bdf8;
-		border: 2px solid #ffffff;
-		border-radius: 50%;
-		cursor: grab;
-		box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
-		display: flex !important;
-		align-items: center;
-		justify-content: center;
-	}
-
-	:global(.overlay-rotate-handle::after) {
-		content: '\21BB';
-		font-size: 13px;
-		color: #ffffff;
-		line-height: 1;
-	}
-
-	:global(.overlay-rotate-handle:hover) {
-		background: #0ea5e9;
-		transform: scale(1.2);
 	}
 
 	:global(.shape-rotate-handle) {
