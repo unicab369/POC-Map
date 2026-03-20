@@ -76,9 +76,15 @@
 	// Redraw shape state
 	let redrawActive = $state(false);
 	let redrawOriginalLayer: any = null;
+	let redrawUndoneVertices = $state<any[]>([]); // stack of undone vertex latlngs for redo
+	let redrawVertexCount = $state(0); // track placed vertex count for undo button state
+	let redrawIsRedoing = false; // flag to prevent onRedrawVertexAdded from clearing redo stack
+	let redrawRestarting = false; // flag to prevent pm:drawend from cancelling during undo/redo restart
 
 	// Original shape snapshot for reset
 	let editModeOriginalShapes: any = null;
+	// Full entity snapshot for discard (X button)
+	let editModeOriginalEntity: any = null;
 
 	// Undo/redo history
 	let undoStack = $state<any[]>([]);
@@ -150,7 +156,7 @@
 
 	function defaultStyle(level: DrawLevel, category: POICategory): ShapeStyle {
 		if (level === 'spot') {
-			return { fill: CATEGORY_COLORS[category] };
+			return { fill: CATEGORY_COLORS[category], opacity: 0.8, stroke: '#cbd5e1', strokeWidth: 1 };
 		}
 		if (level === 'area') {
 			return { fill: CATEGORY_COLORS[category], opacity: 0.7, stroke: '#cbd5e1', strokeWidth: 1 };
@@ -507,6 +513,8 @@
 
 		// Snapshot original shapes for reset
 		editModeOriginalShapes = snapshotEditModeShapes(target);
+		// Snapshot full entity for discard
+		editModeOriginalEntity = JSON.parse(JSON.stringify(entity));
 		undoStack = [];
 		redoStack = [];
 
@@ -1372,7 +1380,42 @@
 		}
 	}
 
-	function exitEditMode() {
+	function discardEditMode() {
+		if (!editMode || !editModeTarget) return;
+
+		// Restore original entity (name, category, style, shape, description)
+		if (editModeOriginalEntity) {
+			const zone = venue.zones.find(z => z.id === editModeTarget.zoneId);
+			if (zone) {
+				if (editModeTarget.type === 'zone') {
+					Object.assign(zone, { name: editModeOriginalEntity.name, category: editModeOriginalEntity.category, style: editModeOriginalEntity.style, shape: editModeOriginalEntity.shape });
+					// Restore child areas/spots if they were part of the snapshot
+					if (editModeOriginalEntity.areas) {
+						zone.areas = editModeOriginalEntity.areas;
+					}
+				} else if (editModeTarget.type === 'area') {
+					const area = zone.areas.find(a => a.id === (editModeTarget as any).areaId);
+					if (area) {
+						Object.assign(area, { name: editModeOriginalEntity.name, category: editModeOriginalEntity.category, style: editModeOriginalEntity.style, shape: editModeOriginalEntity.shape });
+						if (editModeOriginalEntity.spots) {
+							area.spots = editModeOriginalEntity.spots;
+						}
+					}
+				} else {
+					const area = zone.areas.find(a => a.id === (editModeTarget as any).areaId);
+					const spot = area?.spots.find(s => s.id === (editModeTarget as any).spotId);
+					if (spot) {
+						Object.assign(spot, { name: editModeOriginalEntity.name, category: editModeOriginalEntity.category, style: editModeOriginalEntity.style, shape: editModeOriginalEntity.shape, description: editModeOriginalEntity.description });
+					}
+				}
+			}
+		}
+
+		// Skip saving — go straight to cleanup
+		exitEditMode(false);
+	}
+
+	function exitEditMode(save = true) {
 		if (!editMode) return;
 
 		// Cancel any active redraw first
@@ -1381,8 +1424,8 @@
 		// Deselect any active edit-mode selection (disables pm / removes overlay handles)
 		deselectEditModeItem();
 
-		// Capture final shape from layer geometry
-		if (editModeLayer && editModeTarget) {
+		// Capture final shape from layer geometry (only when saving)
+		if (save && editModeLayer && editModeTarget) {
 			let newShape = layerToShapeDef(editModeLayer);
 			const converter = getGeoConverter();
 			if (converter) newShape = converter.shapeToPixel(newShape);
@@ -1403,6 +1446,7 @@
 		editModeTarget = null;
 		editModeLayer = null;
 		editModeOriginalShapes = null;
+		editModeOriginalEntity = null;
 		oneditchange(null);
 
 		// Re-add tile layer and floor background
@@ -1525,6 +1569,12 @@
 		const workingLayer = e.workingLayer;
 		if (!marker || !workingLayer) return;
 
+		// Clear redo stack when a new vertex is placed manually (not via redo)
+		if (!redrawIsRedoing) {
+			redrawUndoneVertices = [];
+		}
+		redrawVertexCount = redrawVertexCount + 1;
+
 		marker.options.draggable = true;
 		if (marker.dragging) marker.dragging.enable();
 
@@ -1537,6 +1587,76 @@
 		});
 	}
 
+	// Collect all current draw-mode vertex latlngs
+	function getRedrawVertices(): Array<{ lat: number; lng: number }> {
+		const drawMode = map?.pm?.Draw?.Polygon;
+		if (!drawMode?._markers) return [];
+		return drawMode._markers.map((m: any) => {
+			const ll = m.getLatLng();
+			return { lat: ll.lat, lng: ll.lng };
+		});
+	}
+
+	// Restart polygon draw with a given set of vertices
+	function restartRedrawWith(vertices: Array<{ lat: number; lng: number }>) {
+		if (!map) return;
+		const L = (window as any).L;
+		const entity = getEditModeEntity();
+
+		// Stop current draw (removes all markers/layers)
+		redrawRestarting = true;
+		map.pm.disableDraw();
+		redrawRestarting = false;
+		map.off('pm:vertexadded', onRedrawVertexAdded);
+
+		// Re-enable draw
+		map.pm.enableDraw('Polygon', {
+			pathOptions: {
+				color: entity?.style.stroke ?? '#cbd5e1',
+				weight: entity?.style.strokeWidth ?? 1,
+				fillColor: entity?.style.fill ?? '#3b82f6',
+				fillOpacity: entity?.style.opacity ?? 0.6
+			}
+		});
+		map.on('pm:vertexadded', onRedrawVertexAdded);
+
+		// Re-place each vertex
+		const drawMode = map.pm.Draw.Polygon;
+		if (drawMode && typeof drawMode._createVertex === 'function') {
+			redrawIsRedoing = true;
+			for (const v of vertices) {
+				drawMode._createVertex({ latlng: L.latLng(v.lat, v.lng) });
+			}
+			redrawIsRedoing = false;
+		}
+	}
+
+	function redrawUndo() {
+		if (!map || !redrawActive) return;
+		const vertices = getRedrawVertices();
+		if (vertices.length === 0) return;
+
+		// Save removed vertex for redo
+		const removed = vertices.pop()!;
+		redrawUndoneVertices = [...redrawUndoneVertices, removed];
+
+		// Restart draw with remaining vertices
+		restartRedrawWith(vertices);
+	}
+
+	function redrawRedo() {
+		if (!map || !redrawActive || redrawUndoneVertices.length === 0) return;
+		const vertices = getRedrawVertices();
+
+		// Pop from redo stack
+		const restored = redrawUndoneVertices[redrawUndoneVertices.length - 1];
+		redrawUndoneVertices = redrawUndoneVertices.slice(0, -1);
+
+		// Add it back and restart
+		vertices.push(restored);
+		restartRedrawWith(vertices);
+	}
+
 	function startRedraw() {
 		if (!editModeLayer || !map) return;
 		const entity = getEditModeEntity();
@@ -1545,9 +1665,9 @@
 		// Deselect current edit-mode selection (disables pm / removes overlay handles)
 		deselectEditModeItem();
 
-		// Hide the current layer and close its tooltip
-		editModeLayer.setStyle({ opacity: 0, fillOpacity: 0 });
+		// Remove the current layer from the map entirely (prevents click-selection)
 		if (editModeLayer.getTooltip()) editModeLayer.closeTooltip();
+		map.removeLayer(editModeLayer);
 
 		// Stash reference
 		redrawOriginalLayer = editModeLayer;
@@ -1568,6 +1688,8 @@
 		// Allow dragging already-placed vertices during draw
 		map.on('pm:vertexadded', onRedrawVertexAdded);
 
+		redrawUndoneVertices = [];
+		redrawVertexCount = 0;
 		redrawActive = true;
 	}
 
@@ -1578,8 +1700,9 @@
 		map.pm.disableDraw();
 		map.off('pm:vertexadded', onRedrawVertexAdded);
 
-		// Restore original layer visibility
+		// Re-add original layer to the map
 		if (redrawOriginalLayer) {
+			redrawOriginalLayer.addTo(map);
 			const entity = getEditModeEntity();
 			if (entity) {
 				redrawOriginalLayer.setStyle({
@@ -2497,10 +2620,17 @@
 	}
 
 	function handleKeydown(e: KeyboardEvent) {
-		if (editMode && (e.metaKey || e.ctrlKey) && e.key === 'z') {
-			e.preventDefault();
-			if (e.shiftKey) { redo(); } else { undo(); }
-			return;
+		if ((e.metaKey || e.ctrlKey) && e.key === 'z') {
+			if (redrawActive) {
+				e.preventDefault();
+				if (e.shiftKey) { redrawRedo(); } else { redrawUndo(); }
+				return;
+			}
+			if (editMode) {
+				e.preventDefault();
+				if (e.shiftKey) { redo(); } else { undo(); }
+				return;
+			}
 		}
 		if (e.key === 'Escape') {
 			if (redrawActive) { cancelRedraw(); return; }
@@ -2755,8 +2885,10 @@
 					this.getTooltip().setLatLng(topLeft);
 				}
 			});
+		} else if (level === 'spot') {
+			layer.bindTooltip(name, { permanent: true, direction: 'top', className: 'label-spot', offset: [0, -5] });
 		} else {
-			layer.bindTooltip(name, { permanent: level !== 'spot', direction: 'center', className: `label-${level}` });
+			layer.bindTooltip(name, { permanent: true, direction: 'center', className: `label-${level}` });
 		}
 		return layer;
 	}
@@ -2918,6 +3050,7 @@
 		map.on('click', (e: any) => {
 			if (zoneClickedFlag) return;
 			if (editMode) {
+				if (redrawActive) return; // don't select anything during redraw
 				// If click is within overlay bounds, select overlay
 				if (overlayLayer && overlayLayer.getBounds().contains(e.latlng) && editModeSelection !== 'overlay') {
 					selectEditModeItem('overlay');
@@ -2944,10 +3077,27 @@
 
 		// Safety net: if draw ends without creating a shape during redraw, cancel
 		map.on('pm:drawend', () => {
-			if (redrawActive) cancelRedraw();
+			if (redrawActive && !redrawRestarting) cancelRedraw();
 		});
 
 		renderExistingShapes();
+
+		// Restore persisted map view (center + zoom)
+		const savedView = localStorage.getItem(`mapEditor:view:${venue.id}`);
+		if (savedView) {
+			try {
+				const { lat, lng, zoom } = JSON.parse(savedView);
+				map.setView([lat, lng], zoom, { animate: false });
+			} catch {}
+		}
+
+		// Persist map view on move/zoom
+		map.on('moveend', () => {
+			if (!map) return;
+			const center = map.getCenter();
+			const zoom = map.getZoom();
+			localStorage.setItem(`mapEditor:view:${venue.id}`, JSON.stringify({ lat: center.lat, lng: center.lng, zoom }));
+		});
 
 		// Auto-enter edit mode if initialEditTarget was provided
 		if (initialEditTarget) {
@@ -3114,9 +3264,9 @@
 			<div class="fab-row-bottom-right">
 				<button
 					class="map-fab"
-					onclick={(e) => { e.stopPropagation(); undo(); }}
+					onclick={(e) => { e.stopPropagation(); redrawActive ? redrawUndo() : undo(); }}
 					title="Undo"
-					disabled={!canUndo}
+					disabled={!redrawActive && !canUndo}
 				>
 					<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
 						<polyline points="1 4 1 10 7 10"></polyline>
@@ -3125,9 +3275,9 @@
 				</button>
 				<button
 					class="map-fab"
-					onclick={(e) => { e.stopPropagation(); redo(); }}
+					onclick={(e) => { e.stopPropagation(); redrawActive ? redrawRedo() : redo(); }}
 					title="Redo"
-					disabled={!canRedo}
+					disabled={!redrawActive && !canRedo}
 				>
 					<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
 						<polyline points="23 4 23 10 17 10"></polyline>
@@ -3246,9 +3396,9 @@
 		<!-- svelte-ignore a11y_click_events_have_key_events -->
 		<div class="side-panel" class:redraw-active={redrawActive} onclick={(e) => e.stopPropagation()}>
 			<div class="sp-header">
-				<button class="sp-close" onclick={exitEditMode} title="Close">&#x2715;</button>
 				<span class="sp-title">Edit {isAreaEdit ? 'Area' : 'Zone'}</span>
 				<div class="sp-header-spacer"></div>
+				<button class="sp-close" onclick={discardEditMode} title="Discard changes">&#x2715;</button>
 			</div>
 
 			<div class="sp-body">
@@ -3402,7 +3552,7 @@
 			</div>
 
 			<div class="sp-footer">
-				<button class="zt-btn zt-btn-primary sp-done-btn" onclick={exitEditMode}>Done</button>
+				<button class="zt-btn zt-btn-primary sp-done-btn" onclick={() => exitEditMode()}>Save</button>
 			</div>
 		</div>
 		{/if}
@@ -3617,6 +3767,7 @@
 	}
 
 	.sp-title {
+		flex: 1;
 		font-size: 16px;
 		font-weight: 700;
 		color: #f1f5f9;
@@ -4476,11 +4627,21 @@
 
 	/* Geoman vertex marker sizing via CSS variable */
 	:global(.map-area .marker-icon) {
-		width: var(--vertex-size, 10px) !important;
-		height: var(--vertex-size, 10px) !important;
-		margin-left: calc(var(--vertex-size, 10px) / -2) !important;
-		margin-top: calc(var(--vertex-size, 10px) / -2) !important;
+		width: var(--vertex-size, 20px) !important;
+		height: var(--vertex-size, 20px) !important;
+		margin-left: calc(var(--vertex-size, 20px) / -2) !important;
+		margin-top: calc(var(--vertex-size, 20px) / -2) !important;
 		border-radius: 50%;
+		background: #3b82f6 !important;
+		border-color: #60a5fa !important;
+	}
+	:global(.map-area .marker-icon-middle) {
+		background: #ffffff !important;
+		border-color: #cbd5e1 !important;
+		opacity: 0.8;
+	}
+	:global(.map-area .marker-icon-middle:hover) {
+		opacity: 1;
 	}
 
 </style>

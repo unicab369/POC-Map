@@ -7,7 +7,8 @@
       "WebFetch(domain:geoman.io)",
       "Bash(node -e:*)",
       "WebFetch(domain:unpkg.com)",
-      "Bash(npx vite build:*)"
+      "Bash(npx vite build:*)",
+      "Bash(python3:*)"
     ]
   }
 }

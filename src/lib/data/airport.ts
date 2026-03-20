@@ -26,8 +26,8 @@ export const airportVenue: Venue = {
 					shape: { type: 'rect', x: 20, y: 20, width: 300, height: 150 },
 					style: { fill: '#bfdbfe', opacity: 0.85 },
 					spots: [
-						{ id: 'a1', name: 'Carousel 1-3', description: 'Domestic flight baggage carousels', category: 'info', shape: { type: 'circle', x: 100, y: 80, radius: 10 }, style: { fill: '#10b981' } },
-						{ id: 'a2', name: 'Carousel 4-6', description: 'International flight baggage carousels', category: 'info', shape: { type: 'circle', x: 250, y: 80, radius: 10 }, style: { fill: '#10b981' } }
+						{ id: 'a1', name: 'Carousel 1-3', description: 'Domestic flight baggage carousels', category: 'info', shape: { type: 'rect', x: 85, y: 70, width: 30, height: 20 }, style: { fill: '#10b981' } },
+						{ id: 'a2', name: 'Carousel 4-6', description: 'International flight baggage carousels', category: 'info', shape: { type: 'rect', x: 235, y: 70, width: 30, height: 20 }, style: { fill: '#10b981' } }
 					]
 				},
 				{
@@ -37,7 +37,7 @@ export const airportVenue: Venue = {
 					shape: { type: 'rect', x: 340, y: 20, width: 200, height: 150 },
 					style: { fill: '#fef9c3', opacity: 0.85 },
 					spots: [
-						{ id: 'a3', name: 'Customs Control', description: 'Immigration and customs checkpoint', category: 'security', shape: { type: 'circle', x: 440, y: 80, radius: 10 }, style: { fill: '#eab308' } }
+						{ id: 'a3', name: 'Customs Control', description: 'Immigration and customs checkpoint', category: 'security', shape: { type: 'rect', x: 425, y: 70, width: 30, height: 20 }, style: { fill: '#eab308' } }
 					]
 				},
 				{
@@ -47,7 +47,7 @@ export const airportVenue: Venue = {
 					shape: { type: 'rect', x: 560, y: 20, width: 220, height: 150 },
 					style: { fill: '#d1fae5', opacity: 0.85 },
 					spots: [
-						{ id: 'a4', name: 'Meeting Point', description: 'Arrivals meeting area', category: 'info', shape: { type: 'circle', x: 670, y: 80, radius: 10 }, style: { fill: '#10b981' } }
+						{ id: 'a4', name: 'Meeting Point', description: 'Arrivals meeting area', category: 'info', shape: { type: 'rect', x: 655, y: 70, width: 30, height: 20 }, style: { fill: '#10b981' } }
 					]
 				},
 				{
@@ -57,8 +57,8 @@ export const airportVenue: Venue = {
 					shape: { type: 'rect', x: 20, y: 190, width: 250, height: 140 },
 					style: { fill: '#e0e7ff', opacity: 0.85 },
 					spots: [
-						{ id: 'a5', name: 'Taxi Stand', description: 'Licensed taxi pickup', category: 'info', shape: { type: 'circle', x: 80, y: 260, radius: 10 }, style: { fill: '#10b981' } },
-						{ id: 'a6', name: 'Bus Station', description: 'Airport shuttle and city buses', category: 'info', shape: { type: 'circle', x: 200, y: 260, radius: 10 }, style: { fill: '#10b981' } }
+						{ id: 'a5', name: 'Taxi Stand', description: 'Licensed taxi pickup', category: 'info', shape: { type: 'rect', x: 65, y: 250, width: 30, height: 20 }, style: { fill: '#10b981' } },
+						{ id: 'a6', name: 'Bus Station', description: 'Airport shuttle and city buses', category: 'info', shape: { type: 'rect', x: 185, y: 250, width: 30, height: 20 }, style: { fill: '#10b981' } }
 					]
 				},
 				{
@@ -68,9 +68,9 @@ export const airportVenue: Venue = {
 					shape: { type: 'rect', x: 290, y: 190, width: 240, height: 140 },
 					style: { fill: '#fce7f3', opacity: 0.85 },
 					spots: [
-						{ id: 'a7', name: 'Cafe Aroma', description: 'Coffee, pastries, and light meals', category: 'food', shape: { type: 'circle', x: 350, y: 260, radius: 10 }, style: { fill: '#f97316' } },
-						{ id: 'a8', name: 'Quick Bites', description: 'Fast food and grab-and-go', category: 'food', shape: { type: 'circle', x: 470, y: 260, radius: 10 }, style: { fill: '#f97316' } },
-						{ id: 'a10', name: 'Restrooms L1', description: 'Arrivals level restrooms', category: 'restroom', shape: { type: 'circle', x: 410, y: 210, radius: 10 }, style: { fill: '#6b7280' } }
+						{ id: 'a7', name: 'Cafe Aroma', description: 'Coffee, pastries, and light meals', category: 'food', shape: { type: 'rect', x: 335, y: 250, width: 30, height: 20 }, style: { fill: '#f97316' } },
+						{ id: 'a8', name: 'Quick Bites', description: 'Fast food and grab-and-go', category: 'food', shape: { type: 'rect', x: 455, y: 250, width: 30, height: 20 }, style: { fill: '#f97316' } },
+						{ id: 'a10', name: 'Restrooms L1', description: 'Arrivals level restrooms', category: 'restroom', shape: { type: 'rect', x: 395, y: 200, width: 30, height: 20 }, style: { fill: '#6b7280' } }
 					]
 				},
 				{
@@ -80,7 +80,7 @@ export const airportVenue: Venue = {
 					shape: { type: 'rect', x: 550, y: 190, width: 230, height: 140 },
 					style: { fill: '#ecfdf5', opacity: 0.85 },
 					spots: [
-						{ id: 'a9', name: 'Hertz Rental', description: 'Car rental counter', category: 'info', shape: { type: 'circle', x: 650, y: 260, radius: 10 }, style: { fill: '#10b981' } }
+						{ id: 'a9', name: 'Hertz Rental', description: 'Car rental counter', category: 'info', shape: { type: 'rect', x: 635, y: 250, width: 30, height: 20 }, style: { fill: '#10b981' } }
 					]
 				}
 			]
@@ -101,8 +101,8 @@ export const airportVenue: Venue = {
 					shape: { type: 'rect', x: 20, y: 20, width: 250, height: 140 },
 					style: { fill: '#dbeafe', opacity: 0.85 },
 					spots: [
-						{ id: 'a11', name: 'Check-in Desks', description: 'Airline check-in counters', category: 'info', shape: { type: 'circle', x: 145, y: 80, radius: 10 }, style: { fill: '#10b981' } },
-						{ id: 'a12', name: 'Self Check-in', description: 'Automated kiosk check-in', category: 'info', shape: { type: 'circle', x: 80, y: 130, radius: 10 }, style: { fill: '#10b981' } }
+						{ id: 'a11', name: 'Check-in Desks', description: 'Airline check-in counters', category: 'info', shape: { type: 'rect', x: 130, y: 70, width: 30, height: 20 }, style: { fill: '#10b981' } },
+						{ id: 'a12', name: 'Self Check-in', description: 'Automated kiosk check-in', category: 'info', shape: { type: 'rect', x: 65, y: 120, width: 30, height: 20 }, style: { fill: '#10b981' } }
 					]
 				},
 				{
@@ -112,8 +112,8 @@ export const airportVenue: Venue = {
 					shape: { type: 'rect', x: 290, y: 20, width: 220, height: 140 },
 					style: { fill: '#fef3c7', opacity: 0.85 },
 					spots: [
-						{ id: 'a13', name: 'Security Check', description: 'Security screening area', category: 'security', shape: { type: 'circle', x: 400, y: 80, radius: 10 }, style: { fill: '#eab308' } },
-						{ id: 'a20', name: 'Restrooms L2', description: 'Departures level restrooms', category: 'restroom', shape: { type: 'circle', x: 350, y: 130, radius: 10 }, style: { fill: '#6b7280' } }
+						{ id: 'a13', name: 'Security Check', description: 'Security screening area', category: 'security', shape: { type: 'rect', x: 385, y: 70, width: 30, height: 20 }, style: { fill: '#eab308' } },
+						{ id: 'a20', name: 'Restrooms L2', description: 'Departures level restrooms', category: 'restroom', shape: { type: 'rect', x: 335, y: 120, width: 30, height: 20 }, style: { fill: '#6b7280' } }
 					]
 				},
 				{
@@ -123,8 +123,8 @@ export const airportVenue: Venue = {
 					shape: { type: 'rect', x: 530, y: 20, width: 250, height: 140 },
 					style: { fill: '#fce7f3', opacity: 0.85 },
 					spots: [
-						{ id: 'a14', name: 'World of Duty Free', description: 'Tax-free shopping', category: 'shop', shape: { type: 'circle', x: 655, y: 60, radius: 10 }, style: { fill: '#3b82f6' } },
-						{ id: 'a15', name: 'Travel Essentials', description: 'Books, snacks, and travel gear', category: 'shop', shape: { type: 'circle', x: 600, y: 120, radius: 10 }, style: { fill: '#3b82f6' } }
+						{ id: 'a14', name: 'World of Duty Free', description: 'Tax-free shopping', category: 'shop', shape: { type: 'rect', x: 640, y: 50, width: 30, height: 20 }, style: { fill: '#3b82f6' } },
+						{ id: 'a15', name: 'Travel Essentials', description: 'Books, snacks, and travel gear', category: 'shop', shape: { type: 'rect', x: 585, y: 110, width: 30, height: 20 }, style: { fill: '#3b82f6' } }
 					]
 				},
 				{
@@ -134,7 +134,7 @@ export const airportVenue: Venue = {
 					shape: { type: 'rect', x: 20, y: 180, width: 240, height: 150 },
 					style: { fill: '#e0e7ff', opacity: 0.85 },
 					spots: [
-						{ id: 'a16', name: 'Gate A1-A4', description: 'Domestic departures', category: 'gate', shape: { type: 'circle', x: 140, y: 250, radius: 10 }, style: { fill: '#ef4444' } }
+						{ id: 'a16', name: 'Gate A1-A4', description: 'Domestic departures', category: 'gate', shape: { type: 'rect', x: 125, y: 240, width: 30, height: 20 }, style: { fill: '#ef4444' } }
 					]
 				},
 				{
@@ -144,8 +144,8 @@ export const airportVenue: Venue = {
 					shape: { type: 'rect', x: 280, y: 180, width: 240, height: 150 },
 					style: { fill: '#ede9fe', opacity: 0.85 },
 					spots: [
-						{ id: 'a17', name: 'Gate B1-B4', description: 'International departures', category: 'gate', shape: { type: 'circle', x: 400, y: 250, radius: 10 }, style: { fill: '#ef4444' } },
-						{ id: 'a19', name: 'Sky Lounge', description: 'Premium passenger lounge', category: 'food', shape: { type: 'circle', x: 400, y: 310, radius: 10 }, style: { fill: '#f97316' } }
+						{ id: 'a17', name: 'Gate B1-B4', description: 'International departures', category: 'gate', shape: { type: 'rect', x: 385, y: 240, width: 30, height: 20 }, style: { fill: '#ef4444' } },
+						{ id: 'a19', name: 'Sky Lounge', description: 'Premium passenger lounge', category: 'food', shape: { type: 'rect', x: 385, y: 300, width: 30, height: 20 }, style: { fill: '#f97316' } }
 					]
 				},
 				{
@@ -155,7 +155,7 @@ export const airportVenue: Venue = {
 					shape: { type: 'rect', x: 540, y: 180, width: 240, height: 150 },
 					style: { fill: '#fef9c3', opacity: 0.85 },
 					spots: [
-						{ id: 'a18', name: 'Gate C1-C4', description: 'Long-haul departures', category: 'gate', shape: { type: 'circle', x: 660, y: 250, radius: 10 }, style: { fill: '#ef4444' } }
+						{ id: 'a18', name: 'Gate C1-C4', description: 'Long-haul departures', category: 'gate', shape: { type: 'rect', x: 645, y: 240, width: 30, height: 20 }, style: { fill: '#ef4444' } }
 					]
 				}
 			]
