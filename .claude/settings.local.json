@@ -5,7 +5,8 @@
       "WebSearch",
       "WebFetch(domain:github.com)",
       "WebFetch(domain:geoman.io)",
-      "Bash(node -e:*)"
+      "Bash(node -e:*)",
+      "WebFetch(domain:unpkg.com)"
     ]
   }
 }

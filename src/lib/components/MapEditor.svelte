@@ -15,7 +15,7 @@
 	let map: any;
 	let shapeLayers: any[] = [];
 	let floorBackgroundLayer: any = null;
-	let venueGeoBounds: any = null; // Leaflet LatLngBounds for "back to venue"
+	let venueGeoBounds = $state<any>(null); // Leaflet LatLngBounds for "back to venue"
 
 	type DrawLevel = 'zone' | 'area' | 'spot';
 	let drawLevel = $state<DrawLevel>('zone');
@@ -63,6 +63,11 @@
 	let tileLayerRef: any = null;
 	let editModeLayer: any = null; // the primary layer being edited (zone or area)
 
+	// Edit mode click-to-select state
+	let editModeSelection = $state<'shape' | 'overlay' | null>(null);
+	let shapeRotateMarker: any = null;
+	let shapeDragHandlers: any = null;
+
 	// Redraw shape state
 	let redrawActive = $state(false);
 	let redrawOriginalLayer: any = null;
@@ -76,6 +81,9 @@
 	let overlayLayer: any = null;
 	let overlayRotation = $state(0);
 	let overlayCornerMarkers: any[] = [];
+	let overlayRotateMarker: any = null;
+	let overlayDragState: { dragging: boolean; startLatLng: any } | null = null;
+	let overlayDragHandlers: { mousedown: any; mousemove: any; mouseup: any } | null = null;
 
 	// Side panel live editing state
 	let panelName = $state('');
@@ -447,6 +455,401 @@
 		}, 50);
 	}
 
+	function selectEditModeItem(item: 'shape' | 'overlay') {
+		if (editModeSelection === item) return;
+		deselectEditModeItem();
+		if (item === 'shape' && editModeLayer) {
+			editModeLayer.pm.enable({ allowSelfIntersection: false });
+			editModeLayer.setStyle({ weight: 3, dashArray: '6 4', color: '#facc15' });
+
+			// Save after vertex edits
+			editModeLayer.on('pm:edit', () => {
+				const p = getShapeRotateHandlePos();
+				if (p && shapeRotateMarker) shapeRotateMarker.setLatLng(p);
+				saveEditModeShapesToData();
+			});
+
+			setupShapeDragOnPath();
+			createShapeRotateMarker();
+		} else if (item === 'overlay') {
+			createOverlayCornerMarkers();
+		}
+		editModeSelection = item;
+	}
+
+	// ── Shape drag via direct DOM handler on SVG _path element ──
+	// L.DomEvent.on(_path, 'mousedown') fires on the SVG <path> itself,
+	// stopPropagation prevents it from reaching the <svg> container or
+	// the map container, so map dragging never starts.
+	// Vertex markers are separate SVG <circle> elements — not affected.
+
+	function setupShapeDragOnPath() {
+		if (!map || !editModeLayer) return;
+		removeShapeDragHandlers();
+		const L = (window as any).L;
+
+		// _path may not be ready immediately after pm.enable(); wait for it
+		const attachToPath = () => {
+			const path = editModeLayer?._path;
+			if (!path) return;
+
+			let dragging = false;
+			let startLatLng: any = null;
+			let startLatlngs: any = null;
+			let startChildLatlngs: any[] = [];
+
+			const onPathDown = (e: any) => {
+				if (!editModeLayer || editModeSelection !== 'shape') return;
+
+				// Stop propagation at DOM level — prevents Leaflet SVG renderer
+				// and map container from seeing this event, so map won't pan
+				e.stopPropagation();
+				e.preventDefault();
+
+				// Also disable map dragging explicitly as a belt-and-suspenders approach
+				map.dragging.disable();
+
+				const touch = e.touches ? e.touches[0] : e;
+				const container = map.getContainer();
+				const containerRect = container.getBoundingClientRect();
+				const containerPoint = L.point(touch.clientX - containerRect.left, touch.clientY - containerRect.top);
+				const latlng = map.containerPointToLatLng(containerPoint);
+
+				dragging = true;
+				startLatLng = latlng;
+				startLatlngs = JSON.parse(JSON.stringify(editModeLayer.getLatLngs()));
+				startChildLatlngs = shapeLayers
+					.filter((sl: any) => sl !== editModeLayer)
+					.map((sl: any) => {
+						if (typeof sl.getLatLngs === 'function') return { type: 'poly', data: JSON.parse(JSON.stringify(sl.getLatLngs())) };
+						return { type: 'circle', data: JSON.parse(JSON.stringify(sl.getLatLng())) };
+					});
+				editModeLayer.pm.disable();
+			};
+
+			const onMouseMove = (e: any) => {
+				if (!dragging || !startLatLng || !editModeLayer) return;
+				const touch = e.touches ? e.touches[0] : e;
+				if (!touch) return;
+				const container = map.getContainer();
+				const containerRect = container.getBoundingClientRect();
+				const containerPoint = L.point(touch.clientX - containerRect.left, touch.clientY - containerRect.top);
+				const currentLatLng = map.containerPointToLatLng(containerPoint);
+
+				const dLat = currentLatLng.lat - startLatLng.lat;
+				const dLng = currentLatLng.lng - startLatLng.lng;
+
+				editModeLayer.setLatLngs(shiftLatlngs(startLatlngs, dLat, dLng));
+				const childLayers = shapeLayers.filter((sl: any) => sl !== editModeLayer);
+				for (let i = 0; i < childLayers.length && i < startChildLatlngs.length; i++) {
+					const snap = startChildLatlngs[i];
+					if (snap.type === 'circle') {
+						childLayers[i].setLatLng(L.latLng(snap.data.lat + dLat, snap.data.lng + dLng));
+					} else {
+						childLayers[i].setLatLngs(shiftLatlngs(snap.data, dLat, dLng));
+					}
+				}
+				const p = getShapeRotateHandlePos();
+				if (p && shapeRotateMarker) shapeRotateMarker.setLatLng(p);
+			};
+
+			const onMouseUp = () => {
+				if (!dragging) return;
+				dragging = false;
+				startLatLng = null;
+				startLatlngs = null;
+				startChildLatlngs = [];
+
+				// Re-enable map dragging
+				map.dragging.enable();
+
+				if (editModeLayer) {
+					editModeLayer.pm.enable({ allowSelfIntersection: false });
+					// Re-attach to possibly-new _path after pm.enable()
+					requestAnimationFrame(() => setupShapeDragOnPath());
+				}
+				const p = getShapeRotateHandlePos();
+				if (p && shapeRotateMarker) shapeRotateMarker.setLatLng(p);
+				saveEditModeShapesToData();
+			};
+
+			// Attach directly to the SVG <path> element
+			path.addEventListener('mousedown', onPathDown, true);
+			path.addEventListener('touchstart', onPathDown, true);
+			window.addEventListener('mousemove', onMouseMove);
+			window.addEventListener('mouseup', onMouseUp);
+			window.addEventListener('touchmove', onMouseMove as any);
+			window.addEventListener('touchend', onMouseUp);
+
+			shapeDragHandlers = { path, pathHandler: onPathDown, mousemove: onMouseMove, mouseup: onMouseUp };
+		};
+
+		if (editModeLayer._path) {
+			attachToPath();
+		} else {
+			// Wait for Leaflet to render the SVG path
+			requestAnimationFrame(() => attachToPath());
+		}
+	}
+
+	function removeShapeDragHandlers() {
+		if (!shapeDragHandlers) return;
+		const path = shapeDragHandlers.path;
+		if (path && shapeDragHandlers.pathHandler) {
+			path.removeEventListener('mousedown', shapeDragHandlers.pathHandler, true);
+			path.removeEventListener('touchstart', shapeDragHandlers.pathHandler, true);
+		}
+		window.removeEventListener('mousemove', shapeDragHandlers.mousemove);
+		window.removeEventListener('mouseup', shapeDragHandlers.mouseup);
+		window.removeEventListener('touchmove', shapeDragHandlers.mousemove as any);
+		window.removeEventListener('touchend', shapeDragHandlers.mouseup);
+		shapeDragHandlers = null;
+	}
+
+	// ── Shape rotate marker + rotation via native DOM event on marker element ──
+
+	function getShapeRotateHandlePos() {
+		if (!editModeLayer || !map) return null;
+		const L = (window as any).L;
+		const bounds = editModeLayer.getBounds();
+		const ne = bounds.getNorthEast();
+		const nePt = map.latLngToContainerPoint(ne);
+		const center = bounds.getCenter();
+		const centerPt = map.latLngToContainerPoint(center);
+		const dx = nePt.x - centerPt.x;
+		const dy = nePt.y - centerPt.y;
+		const dist = Math.sqrt(dx * dx + dy * dy);
+		if (dist === 0) return null;
+		const offsetPt = L.point(nePt.x + (dx / dist) * 30, nePt.y + (dy / dist) * 30);
+		return map.containerPointToLatLng(offsetPt);
+	}
+
+	function createShapeRotateMarker() {
+		if (!editModeLayer || !map) return;
+		removeShapeRotateMarker();
+		const L = (window as any).L;
+		const pos = getShapeRotateHandlePos();
+		if (!pos) return;
+
+		const rotateIcon = L.divIcon({
+			className: 'shape-rotate-handle',
+			iconSize: [32, 32],
+			iconAnchor: [16, 16]
+		});
+		shapeRotateMarker = L.marker(pos, {
+			icon: rotateIcon,
+			draggable: false,
+			interactive: true,
+			zIndexOffset: 10001
+		}).addTo(map);
+
+		let rotating = false;
+		let startLatlngs: any = null;
+		let startChildLatlngs: any[] = [];
+		let centerPt: any = null;
+		let baseAngle = 0;
+
+		const onRotateDown = (e: any) => {
+			if (!editModeLayer) return;
+			e.stopPropagation();
+			e.preventDefault();
+			map.dragging.disable();
+
+			rotating = true;
+			const bounds = editModeLayer.getBounds();
+			centerPt = map.latLngToContainerPoint(bounds.getCenter());
+
+			startLatlngs = JSON.parse(JSON.stringify(editModeLayer.getLatLngs()));
+			startChildLatlngs = shapeLayers
+				.filter((sl: any) => sl !== editModeLayer)
+				.map((sl: any) => {
+					if (typeof sl.getLatLngs === 'function') return { type: 'poly', data: JSON.parse(JSON.stringify(sl.getLatLngs())) };
+					return { type: 'circle', data: JSON.parse(JSON.stringify(sl.getLatLng())) };
+				});
+
+			const touch = e.touches ? e.touches[0] : e;
+			const container = map.getContainer();
+			const containerRect = container.getBoundingClientRect();
+			const mx = touch.clientX - containerRect.left;
+			const my = touch.clientY - containerRect.top;
+			baseAngle = Math.atan2(mx - centerPt.x, -(my - centerPt.y));
+
+			editModeLayer.pm.disable();
+		};
+
+		const onMouseMove = (e: any) => {
+			if (!rotating || !startLatlngs || !centerPt || !editModeLayer) return;
+			const touch = e.touches ? e.touches[0] : e;
+			if (!touch) return;
+			const container = map.getContainer();
+			const containerRect = container.getBoundingClientRect();
+			const mx = touch.clientX - containerRect.left;
+			const my = touch.clientY - containerRect.top;
+			const curAngle = Math.atan2(mx - centerPt.x, -(my - centerPt.y));
+			const da = curAngle - baseAngle;
+
+			const rot = (lat: number, lng: number) => {
+				const pt = map.latLngToContainerPoint(L.latLng(lat, lng));
+				const dx = pt.x - centerPt.x, dy = pt.y - centerPt.y;
+				return map.containerPointToLatLng(L.point(
+					centerPt.x + dx * Math.cos(da) - dy * Math.sin(da),
+					centerPt.y + dx * Math.sin(da) + dy * Math.cos(da)
+				));
+			};
+			const rotArr = (arr: any[]): any[] =>
+				arr.map((v: any) => Array.isArray(v) ? rotArr(v) : rot(v.lat, v.lng));
+
+			editModeLayer.setLatLngs(rotArr(startLatlngs));
+			const childLayers = shapeLayers.filter((sl: any) => sl !== editModeLayer);
+			for (let i = 0; i < childLayers.length && i < startChildLatlngs.length; i++) {
+				const snap = startChildLatlngs[i];
+				if (snap.type === 'circle') {
+					const rc = rot(snap.data.lat, snap.data.lng);
+					childLayers[i].setLatLng(rc);
+				} else {
+					childLayers[i].setLatLngs(rotArr(snap.data));
+				}
+			}
+			const p = getShapeRotateHandlePos();
+			if (p && shapeRotateMarker) shapeRotateMarker.setLatLng(p);
+		};
+
+		const onMouseUp = () => {
+			if (!rotating) return;
+			rotating = false;
+			map.dragging.enable();
+
+			if (!editModeLayer) return;
+
+			// Convert Rectangles to Polygons so vertex editing doesn't snap to axis-aligned
+			if (editModeLayer instanceof L.Rectangle) {
+				const ll = editModeLayer.getLatLngs()[0];
+				const opts = editModeLayer.options;
+				const tt = editModeLayer.getTooltip();
+				const ttContent = tt?.getContent();
+				const ttOpts = tt?.options;
+				map.removeLayer(editModeLayer);
+				shapeLayers = shapeLayers.filter((sl: any) => sl !== editModeLayer);
+				const poly = L.polygon(ll, { color: opts.color, weight: opts.weight, fillColor: opts.fillColor, fillOpacity: opts.fillOpacity, opacity: opts.opacity, dashArray: opts.dashArray }).addTo(map);
+				if (ttContent && ttOpts) poly.bindTooltip(ttContent, ttOpts);
+				poly.on('click', () => { zoneClickedFlag = true; setTimeout(() => zoneClickedFlag = false, 0); selectEditModeItem('shape'); });
+				shapeLayers.unshift(poly);
+				editModeLayer = poly;
+			}
+			for (let i = 0; i < shapeLayers.length; i++) {
+				const sl = shapeLayers[i];
+				if (sl === editModeLayer || !(sl instanceof L.Rectangle)) continue;
+				const cll = sl.getLatLngs()[0];
+				const co = sl.options;
+				const ct = sl.getTooltip();
+				map.removeLayer(sl);
+				const cp = L.polygon(cll, { color: co.color, weight: co.weight, fillColor: co.fillColor, fillOpacity: co.fillOpacity, opacity: co.opacity }).addTo(map);
+				if (ct) cp.bindTooltip(ct.getContent(), ct.options);
+				shapeLayers[i] = cp;
+			}
+
+			editModeLayer.pm.enable({ allowSelfIntersection: false });
+			// Re-attach shape drag handler since _path may have changed
+			requestAnimationFrame(() => setupShapeDragOnPath());
+			const p = getShapeRotateHandlePos();
+			if (p && shapeRotateMarker) shapeRotateMarker.setLatLng(p);
+			saveEditModeShapesToData();
+			startLatlngs = null; startChildLatlngs = []; centerPt = null;
+		};
+
+		// Attach to the marker's actual DOM element for reliable event interception
+		const markerEl = shapeRotateMarker.getElement();
+		if (markerEl) {
+			markerEl.addEventListener('mousedown', onRotateDown, true);
+			markerEl.addEventListener('touchstart', onRotateDown, true);
+		}
+
+		window.addEventListener('mousemove', onMouseMove);
+		window.addEventListener('mouseup', onMouseUp);
+		window.addEventListener('touchmove', onMouseMove as any);
+		window.addEventListener('touchend', onMouseUp);
+
+		// Store for cleanup
+		(shapeRotateMarker as any)._rotateCleanup = () => {
+			if (markerEl) {
+				markerEl.removeEventListener('mousedown', onRotateDown, true);
+				markerEl.removeEventListener('touchstart', onRotateDown, true);
+			}
+			window.removeEventListener('mousemove', onMouseMove);
+			window.removeEventListener('mouseup', onMouseUp);
+			window.removeEventListener('touchmove', onMouseMove as any);
+			window.removeEventListener('touchend', onMouseUp);
+		};
+	}
+
+	function shiftLatlngs(arr: any[], dLat: number, dLng: number): any[] {
+		const L = (window as any).L;
+		return arr.map((v: any) => {
+			if (Array.isArray(v)) return shiftLatlngs(v, dLat, dLng);
+			return L.latLng(v.lat + dLat, v.lng + dLng);
+		});
+	}
+
+	function saveEditModeShapesToData() {
+		if (!editModeTarget || !editModeLayer) return;
+		const converter = getGeoConverter();
+		const entity = getEditModeEntity();
+		if (!entity) return;
+		let ns = layerToShapeDef(editModeLayer);
+		if (converter) ns = converter.shapeToPixel(ns);
+		entity.shape = ns;
+		const childLayers = shapeLayers.filter((sl: any) => sl !== editModeLayer);
+		if (editModeTarget.type === 'zone') {
+			const zone = venue.zones.find(z => z.id === editModeTarget!.zoneId);
+			if (zone) {
+				let ci = 0;
+				for (const a of zone.areas) {
+					if (ci < childLayers.length) { let s = layerToShapeDef(childLayers[ci]); if (converter) s = converter.shapeToPixel(s); a.shape = s; ci++; }
+					for (const sp of a.spots) { if (ci < childLayers.length) { let s = layerToShapeDef(childLayers[ci]); if (converter) s = converter.shapeToPixel(s); sp.shape = s; ci++; } }
+				}
+			}
+		} else if (editModeTarget.type === 'area') {
+			const zone = venue.zones.find(z => z.id === editModeTarget!.zoneId);
+			const area = zone?.areas.find(a => a.id === (editModeTarget as any).areaId);
+			if (area) {
+				let ci = 0;
+				for (const sp of area.spots) { if (ci < childLayers.length) { let s = layerToShapeDef(childLayers[ci]); if (converter) s = converter.shapeToPixel(s); sp.shape = s; ci++; } }
+			}
+		}
+		venue = { ...venue };
+	}
+
+	function removeShapeRotateMarker() {
+		if (shapeRotateMarker && map) {
+			if ((shapeRotateMarker as any)._rotateCleanup) {
+				(shapeRotateMarker as any)._rotateCleanup();
+			}
+			map.removeLayer(shapeRotateMarker);
+			shapeRotateMarker = null;
+		}
+	}
+
+	function deselectEditModeItem() {
+		if (editModeSelection === 'shape' && editModeLayer) {
+			editModeLayer.off('pm:edit');
+			editModeLayer.pm.disable();
+			removeShapeDragHandlers();
+			removeShapeRotateMarker();
+			const entity = getEditModeEntity();
+			if (entity) {
+				editModeLayer.setStyle({
+					color: entity.style.stroke ?? '#cbd5e1',
+					weight: entity.style.strokeWidth ?? 1,
+					dashArray: ''
+				});
+			}
+		} else if (editModeSelection === 'overlay') {
+			removeOverlayCornerMarkers();
+			removeOverlayDragHandlers();
+		}
+		editModeSelection = null;
+	}
+
 	function renderEditModeShapes() {
 		if (!map || !editModeTarget) return;
 		const L = (window as any).L;
@@ -468,7 +871,11 @@
 				zoneLayer.addTo(map);
 				shapeLayers.push(zoneLayer);
 				editModeLayer = zoneLayer;
-				zoneLayer.pm.enable({ allowSelfIntersection: false });
+				zoneLayer.on('click', () => {
+					zoneClickedFlag = true;
+					setTimeout(() => zoneClickedFlag = false, 0);
+					selectEditModeItem('shape');
+				});
 			}
 			for (const area of zone.areas) {
 				const areaLayer = shapeDefToLayer(area.shape, area.style, area.name, 'area', converter);
@@ -487,7 +894,11 @@
 				areaLayer.addTo(map);
 				shapeLayers.push(areaLayer);
 				editModeLayer = areaLayer;
-				areaLayer.pm.enable({ allowSelfIntersection: false });
+				areaLayer.on('click', () => {
+					zoneClickedFlag = true;
+					setTimeout(() => zoneClickedFlag = false, 0);
+					selectEditModeItem('shape');
+				});
 			}
 			for (const spot of area.spots) {
 				const spotLayer = shapeDefToLayer(spot.shape, spot.style, spot.name, 'spot', converter);
@@ -504,7 +915,11 @@
 				spotLayer.addTo(map);
 				shapeLayers.push(spotLayer);
 				editModeLayer = spotLayer;
-				spotLayer.pm.enable({ allowSelfIntersection: false });
+				spotLayer.on('click', () => {
+					zoneClickedFlag = true;
+					setTimeout(() => zoneClickedFlag = false, 0);
+					selectEditModeItem('shape');
+				});
 			}
 		}
 	}
@@ -515,9 +930,11 @@
 		// Cancel any active redraw first
 		if (redrawActive) cancelRedraw();
 
-		// Capture final shape from Geoman editing
+		// Deselect any active edit-mode selection (disables pm / removes overlay handles)
+		deselectEditModeItem();
+
+		// Capture final shape from layer geometry
 		if (editModeLayer && editModeTarget) {
-			editModeLayer.pm.disable();
 			let newShape = layerToShapeDef(editModeLayer);
 			const converter = getGeoConverter();
 			if (converter) newShape = converter.shapeToPixel(newShape);
@@ -653,8 +1070,8 @@
 		const entity = getEditModeEntity();
 		if (!entity) return;
 
-		// Disable vertex editing on current layer
-		editModeLayer.pm.disable();
+		// Deselect current edit-mode selection (disables pm / removes overlay handles)
+		deselectEditModeItem();
 
 		// Hide the current layer and close its tooltip
 		editModeLayer.setStyle({ opacity: 0, fillOpacity: 0 });
@@ -697,13 +1114,14 @@
 				});
 			}
 			if (redrawOriginalLayer.getTooltip()) redrawOriginalLayer.openTooltip();
-
-			// Re-enable vertex editing
-			redrawOriginalLayer.pm.enable({ allowSelfIntersection: false });
 		}
 
 		redrawActive = false;
 		redrawOriginalLayer = null;
+
+		// Re-select shape so vertex editing is restored
+		editModeSelection = null;
+		selectEditModeItem('shape');
 	}
 
 	function completeRedraw(newLayer: any) {
@@ -779,7 +1197,6 @@
 		overlayLayer.bringToBack();
 
 		setTimeout(() => {
-			createOverlayCornerMarkers();
 			hookOverlayRotation();
 		}, 50);
 	}
@@ -799,6 +1216,7 @@
 	}
 
 	function clearOverlay() {
+		if (editModeSelection === 'overlay') editModeSelection = null;
 		removeOverlayFromMap();
 		if (overlayImageUrl.startsWith('blob:')) {
 			URL.revokeObjectURL(overlayImageUrl);
@@ -808,17 +1226,54 @@
 		overlayRotation = 0;
 	}
 
+	function getRotatedOverlayCorners(): any[] {
+		if (!overlayLayer || !map) return [];
+		const L = (window as any).L;
+		const bounds = overlayLayer.getBounds();
+		const center = bounds.getCenter();
+		const centerPt = map.latLngToContainerPoint(center);
+		const corners = [
+			bounds.getSouthWest(), bounds.getSouthEast(),
+			bounds.getNorthEast(), bounds.getNorthWest()
+		];
+		const rad = overlayRotation * Math.PI / 180;
+		return corners.map((c: any) => {
+			const pt = map.latLngToContainerPoint(c);
+			const dx = pt.x - centerPt.x;
+			const dy = pt.y - centerPt.y;
+			const rx = dx * Math.cos(rad) - dy * Math.sin(rad);
+			const ry = dx * Math.sin(rad) + dy * Math.cos(rad);
+			return map.containerPointToLatLng(
+				L.point(centerPt.x + rx, centerPt.y + ry)
+			);
+		});
+	}
+
+	function getOverlayRotateHandlePos() {
+		if (!overlayLayer || !map) return null;
+		const L = (window as any).L;
+		const rotatedCorners = getRotatedOverlayCorners();
+		if (rotatedCorners.length < 4) return null;
+		const ne = rotatedCorners[2]; // rotated NE corner
+		const bounds = overlayLayer.getBounds();
+		const center = bounds.getCenter();
+		const centerPt = map.latLngToContainerPoint(center);
+		const nePt = map.latLngToContainerPoint(ne);
+		// Offset 30px outward from center through the NE corner
+		const dx = nePt.x - centerPt.x;
+		const dy = nePt.y - centerPt.y;
+		const dist = Math.sqrt(dx * dx + dy * dy);
+		if (dist === 0) return null;
+		const offsetPoint = L.point(nePt.x + (dx / dist) * 30, nePt.y + (dy / dist) * 30);
+		return map.containerPointToLatLng(offsetPoint);
+	}
+
 	function createOverlayCornerMarkers() {
 		if (!overlayLayer || !map) return;
 		removeOverlayCornerMarkers();
 		const L = (window as any).L;
-		const bounds = overlayLayer.getBounds();
-		const corners = [
-			bounds.getSouthWest(),
-			bounds.getSouthEast(),
-			bounds.getNorthEast(),
-			bounds.getNorthWest()
-		];
+		const corners = getRotatedOverlayCorners();
+		if (corners.length < 4) return;
 
 		for (let i = 0; i < 4; i++) {
 			const icon = L.divIcon({
@@ -836,44 +1291,118 @@
 			marker.on('dragend', () => handleCornerDragEnd());
 			overlayCornerMarkers.push(marker);
 		}
+
+		// Rotation handle — offset from NE corner
+		const rotatePos = getOverlayRotateHandlePos();
+		if (rotatePos) {
+			const rotateIcon = L.divIcon({
+				className: 'overlay-rotate-handle',
+				iconSize: [20, 20],
+				iconAnchor: [10, 10]
+			});
+			overlayRotateMarker = L.marker(rotatePos, {
+				icon: rotateIcon,
+				draggable: true,
+				zIndexOffset: 10001
+			}).addTo(map);
+
+			overlayRotateMarker.on('drag', () => {
+				handleRotateHandleDrag(overlayRotateMarker.getLatLng());
+			});
+		}
+
+		// Set up drag handlers for the overlay body
+		setupOverlayDragHandlers();
 	}
 
 	function handleCornerDrag(cornerIndex: number, newLatLng: any) {
-		if (!overlayLayer) return;
+		if (!overlayLayer || !map) return;
 		const L = (window as any).L;
 		const bounds = overlayLayer.getBounds();
+		const center = bounds.getCenter();
+		const centerPt = map.latLngToContainerPoint(center);
+
+		// Inverse-rotate the dragged point back to axis-aligned space
+		const rad = -overlayRotation * Math.PI / 180;
+		const dragPt = map.latLngToContainerPoint(newLatLng);
+		const dx = dragPt.x - centerPt.x;
+		const dy = dragPt.y - centerPt.y;
+		const urx = dx * Math.cos(rad) - dy * Math.sin(rad);
+		const ury = dx * Math.sin(rad) + dy * Math.cos(rad);
+		const unrotatedPt = L.point(centerPt.x + urx, centerPt.y + ury);
+		const unrotatedLatLng = map.containerPointToLatLng(unrotatedPt);
+
 		let south = bounds.getSouth();
 		let west = bounds.getWest();
 		let north = bounds.getNorth();
 		let east = bounds.getEast();
 
 		switch (cornerIndex) {
-			case 0: south = newLatLng.lat; west = newLatLng.lng; break;
-			case 1: south = newLatLng.lat; east = newLatLng.lng; break;
-			case 2: north = newLatLng.lat; east = newLatLng.lng; break;
-			case 3: north = newLatLng.lat; west = newLatLng.lng; break;
+			case 0: south = unrotatedLatLng.lat; west = unrotatedLatLng.lng; break;
+			case 1: south = unrotatedLatLng.lat; east = unrotatedLatLng.lng; break;
+			case 2: north = unrotatedLatLng.lat; east = unrotatedLatLng.lng; break;
+			case 3: north = unrotatedLatLng.lat; west = unrotatedLatLng.lng; break;
 		}
 
 		if (south >= north || west >= east) return;
 
 		const newBounds = L.latLngBounds([south, west], [north, east]);
 		overlayLayer.setBounds(newBounds);
+		applyOverlayRotation();
 
-		const updatedCorners = [
-			newBounds.getSouthWest(),
-			newBounds.getSouthEast(),
-			newBounds.getNorthEast(),
-			newBounds.getNorthWest()
-		];
+		// Reposition all corner markers at new rotated positions
+		const updatedCorners = getRotatedOverlayCorners();
 		for (let i = 0; i < 4; i++) {
-			if (i !== cornerIndex && overlayCornerMarkers[i]) {
+			if (overlayCornerMarkers[i]) {
 				overlayCornerMarkers[i].setLatLng(updatedCorners[i]);
 			}
+		}
+		// Reposition rotation handle during resize
+		if (overlayRotateMarker) {
+			const pos = getOverlayRotateHandlePos();
+			if (pos) overlayRotateMarker.setLatLng(pos);
 		}
 	}
 
 	function handleCornerDragEnd() {
 		applyOverlayRotation();
+		// Reposition all corner markers at rotated positions
+		const updatedCorners = getRotatedOverlayCorners();
+		for (let i = 0; i < 4; i++) {
+			if (overlayCornerMarkers[i]) {
+				overlayCornerMarkers[i].setLatLng(updatedCorners[i]);
+			}
+		}
+		// Reposition rotation handle after resize
+		if (overlayRotateMarker) {
+			const pos = getOverlayRotateHandlePos();
+			if (pos) overlayRotateMarker.setLatLng(pos);
+		}
+	}
+
+	function handleRotateHandleDrag(handleLatLng: any) {
+		if (!overlayLayer || !map) return;
+		const bounds = overlayLayer.getBounds();
+		const center = bounds.getCenter();
+		const centerPt = map.latLngToContainerPoint(center);
+		const handlePt = map.latLngToContainerPoint(handleLatLng);
+		// Angle from center to handle in screen coords (0° = up/north, clockwise)
+		const dx = handlePt.x - centerPt.x;
+		const dy = handlePt.y - centerPt.y;
+		// atan2 gives angle from positive X axis; we want angle from positive Y-up (north)
+		// In screen coords Y is inverted, so "up" is negative Y
+		let angle = Math.atan2(dx, -dy) * (180 / Math.PI);
+		if (angle < 0) angle += 360;
+		overlayRotation = Math.round(angle);
+		applyOverlayRotation();
+
+		// Reposition corner markers at new rotated positions
+		const updatedCorners = getRotatedOverlayCorners();
+		for (let i = 0; i < 4; i++) {
+			if (overlayCornerMarkers[i]) {
+				overlayCornerMarkers[i].setLatLng(updatedCorners[i]);
+			}
+		}
 	}
 
 	function removeOverlayCornerMarkers() {
@@ -881,6 +1410,92 @@
 			if (map) map.removeLayer(marker);
 		}
 		overlayCornerMarkers = [];
+		if (overlayRotateMarker && map) {
+			map.removeLayer(overlayRotateMarker);
+			overlayRotateMarker = null;
+		}
+	}
+
+	function setupOverlayDragHandlers() {
+		if (!map || !overlayLayer) return;
+		removeOverlayDragHandlers();
+
+		const container = map.getContainer();
+		const L = (window as any).L;
+
+		const onMouseDown = (e: MouseEvent) => {
+			if (!overlayLayer || editModeSelection !== 'overlay') return;
+			// Ignore if click is on a handle marker
+			const target = e.target as HTMLElement;
+			if (target.closest('.overlay-corner-handle') || target.closest('.overlay-rotate-handle')) return;
+
+			const containerRect = container.getBoundingClientRect();
+			const containerPoint = L.point(e.clientX - containerRect.left, e.clientY - containerRect.top);
+			const latlng = map.containerPointToLatLng(containerPoint);
+
+			if (!overlayLayer.getBounds().contains(latlng)) return;
+
+			e.preventDefault();
+			e.stopPropagation();
+			map.dragging.disable();
+			overlayDragState = { dragging: true, startLatLng: latlng };
+		};
+
+		const onMouseMove = (e: MouseEvent) => {
+			if (!overlayDragState?.dragging || !overlayLayer) return;
+
+			const containerRect = container.getBoundingClientRect();
+			const containerPoint = L.point(e.clientX - containerRect.left, e.clientY - containerRect.top);
+			const currentLatLng = map.containerPointToLatLng(containerPoint);
+
+			const dlat = currentLatLng.lat - overlayDragState.startLatLng.lat;
+			const dlng = currentLatLng.lng - overlayDragState.startLatLng.lng;
+
+			const bounds = overlayLayer.getBounds();
+			const newBounds = L.latLngBounds(
+				[bounds.getSouth() + dlat, bounds.getWest() + dlng],
+				[bounds.getNorth() + dlat, bounds.getEast() + dlng]
+			);
+			overlayLayer.setBounds(newBounds);
+			applyOverlayRotation();
+
+			// Move all corner markers
+			const updatedCorners = getRotatedOverlayCorners();
+			for (let i = 0; i < 4; i++) {
+				if (overlayCornerMarkers[i]) {
+					overlayCornerMarkers[i].setLatLng(updatedCorners[i]);
+				}
+			}
+			// Move rotation handle
+			if (overlayRotateMarker) {
+				const pos = getOverlayRotateHandlePos();
+				if (pos) overlayRotateMarker.setLatLng(pos);
+			}
+
+			overlayDragState.startLatLng = currentLatLng;
+		};
+
+		const onMouseUp = () => {
+			if (!overlayDragState?.dragging) return;
+			overlayDragState = null;
+			map.dragging.enable();
+		};
+
+		container.addEventListener('mousedown', onMouseDown);
+		window.addEventListener('mousemove', onMouseMove);
+		window.addEventListener('mouseup', onMouseUp);
+
+		overlayDragHandlers = { mousedown: onMouseDown, mousemove: onMouseMove, mouseup: onMouseUp };
+	}
+
+	function removeOverlayDragHandlers() {
+		if (!overlayDragHandlers || !map) return;
+		const container = map.getContainer();
+		container.removeEventListener('mousedown', overlayDragHandlers.mousedown);
+		window.removeEventListener('mousemove', overlayDragHandlers.mousemove);
+		window.removeEventListener('mouseup', overlayDragHandlers.mouseup);
+		overlayDragHandlers = null;
+		overlayDragState = null;
 	}
 
 	function applyOverlayRotation() {
@@ -1427,8 +2042,17 @@
 		});
 
 		// Click on map background deselects zone/area
-		map.on('click', () => {
+		map.on('click', (e: any) => {
 			if (zoneClickedFlag) return;
+			if (editMode) {
+				// If click is within overlay bounds, select overlay
+				if (overlayLayer && overlayLayer.getBounds().contains(e.latlng) && editModeSelection !== 'overlay') {
+					selectEditModeItem('overlay');
+				} else {
+					deselectEditModeItem();
+				}
+				return;
+			}
 			if (editingTarget) deselectEntity();
 			if (editingZoneId) deselectZone();
 		});
@@ -1563,7 +2187,7 @@
 		<div class="map-area" bind:this={mapContainer}></div>
 
 		<div class="fab-column" bind:this={fabColumnEl}>
-			{#if !editMode && venueGeoBounds}
+			{#if venueGeoBounds}
 				<button
 					class="map-fab"
 					onclick={(e) => { e.stopPropagation(); map?.flyToBounds(venueGeoBounds, { duration: 0.8 }); }}
@@ -2693,13 +3317,15 @@
 		font-size: 10px !important;
 	}
 
-	/* Geocoder FAB styling */
-	:global(.leaflet-control-geocoder) {
+	/* Geocoder FAB styling — lives inside .fab-column */
+	:global(.fab-column .leaflet-control-geocoder) {
 		border: none !important;
 		border-radius: 50% !important;
 		box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4) !important;
 		background: #1e293b !important;
 		overflow: visible !important;
+		margin: 0 !important;
+		pointer-events: auto;
 	}
 
 	:global(.leaflet-control-geocoder.leaflet-control-geocoder-expanded) {
@@ -2761,6 +3387,56 @@
 	:global(.overlay-corner-handle:hover) {
 		background: #fbbf24;
 		transform: scale(1.3);
+	}
+
+	:global(.overlay-rotate-handle) {
+		width: 20px !important;
+		height: 20px !important;
+		background: #38bdf8;
+		border: 2px solid #ffffff;
+		border-radius: 50%;
+		cursor: grab;
+		box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+		display: flex !important;
+		align-items: center;
+		justify-content: center;
+	}
+
+	:global(.overlay-rotate-handle::after) {
+		content: '\21BB';
+		font-size: 13px;
+		color: #ffffff;
+		line-height: 1;
+	}
+
+	:global(.overlay-rotate-handle:hover) {
+		background: #0ea5e9;
+		transform: scale(1.2);
+	}
+
+	:global(.shape-rotate-handle) {
+		width: 32px !important;
+		height: 32px !important;
+		background: #38bdf8;
+		border: 2px solid #ffffff;
+		border-radius: 50%;
+		cursor: grab;
+		box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+		display: flex !important;
+		align-items: center;
+		justify-content: center;
+	}
+
+	:global(.shape-rotate-handle::after) {
+		content: '\21BB';
+		font-size: 18px;
+		color: #ffffff;
+		line-height: 1;
+	}
+
+	:global(.shape-rotate-handle:hover) {
+		background: #0ea5e9;
+		transform: scale(1.15);
 	}
 
 </style>
