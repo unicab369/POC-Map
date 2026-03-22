@@ -26,6 +26,7 @@ export interface Zone {
 	areas: Area[];
 	zoneType?: 'regular' | 'floor';
 	level?: number;
+	labelPosition?: { x: number; y: number };
 }
 
 export interface Area {
@@ -35,6 +36,7 @@ export interface Area {
 	shape: ShapeDef;
 	style: ShapeStyle;
 	spots: Spot[];
+	labelPosition?: { x: number; y: number };
 }
 
 export interface Spot {

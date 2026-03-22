@@ -24,9 +24,10 @@ function createSpotMarker(spot: Spot, onClick: SpotClickHandler): Konva.Group {
 		listening: true
 	});
 
-	group.add(new Konva.Circle({ x: 1, y: 2, radius: 10, fill: 'rgba(0,0,0,0.15)' }));
-	group.add(new Konva.Circle({ radius: 10, fill: color, stroke: '#ffffff', strokeWidth: 2 }));
-	group.add(new Konva.Circle({ radius: 3, fill: '#ffffff' }));
+	const s = 10; // half-size
+	group.add(new Konva.Rect({ x: -s + 1, y: -s + 2, width: s * 2, height: s * 2, fill: 'rgba(0,0,0,0.15)', cornerRadius: 3 }));
+	group.add(new Konva.Rect({ x: -s, y: -s, width: s * 2, height: s * 2, fill: color, stroke: '#ffffff', strokeWidth: 2, cornerRadius: 3 }));
+	group.add(new Konva.Rect({ x: -3, y: -3, width: 6, height: 6, fill: '#ffffff', cornerRadius: 1 }));
 
 	group.on('mouseenter', () => {
 		group.to({ scaleX: 1.3, scaleY: 1.3, duration: 0.15 });

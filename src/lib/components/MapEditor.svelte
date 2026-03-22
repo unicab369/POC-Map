@@ -81,6 +81,18 @@
 	let redrawIsRedoing = false; // flag to prevent onRedrawVertexAdded from clearing redo stack
 	let redrawRestarting = false; // flag to prevent pm:drawend from cancelling during undo/redo restart
 
+	// Shape toolbox popover state
+	let shapeToolboxPanel = $state<'fill' | 'stroke' | null>(null);
+
+	// Label placement state
+	let placingLabel = $state(false);
+	let labelMarker: any = null; // draggable label marker in edit mode
+
+	// Add-spot-in-edit-mode state
+	let addingSpot = $state(false);
+	let addSpotName = $state('');
+	let addSpotDrawing = $state(false); // true when polygon draw is active
+
 	// Original shape snapshot for reset
 	let editModeOriginalShapes: any = null;
 	// Full entity snapshot for discard (X button)
@@ -434,8 +446,9 @@
 		if (target.type === 'zone') {
 			return JSON.parse(JSON.stringify({
 				shape: zone.shape,
+				labelPosition: zone.labelPosition,
 				areas: zone.areas.map(a => ({
-					id: a.id, shape: a.shape,
+					id: a.id, shape: a.shape, labelPosition: a.labelPosition,
 					spots: a.spots.map(s => ({ id: s.id, shape: s.shape }))
 				}))
 			}));
@@ -444,6 +457,7 @@
 			if (!area) return null;
 			return JSON.parse(JSON.stringify({
 				shape: area.shape,
+				labelPosition: area.labelPosition,
 				spots: area.spots.map(s => ({ id: s.id, shape: s.shape }))
 			}));
 		} else {
@@ -461,10 +475,12 @@
 
 		if (editModeTarget.type === 'zone') {
 			zone.shape = editModeOriginalShapes.shape;
+			zone.labelPosition = editModeOriginalShapes.labelPosition;
 			for (const aSnap of editModeOriginalShapes.areas) {
 				const area = zone.areas.find(a => a.id === aSnap.id);
 				if (area) {
 					area.shape = aSnap.shape;
+					area.labelPosition = aSnap.labelPosition;
 					for (const sSnap of aSnap.spots) {
 						const spot = area.spots.find(s => s.id === sSnap.id);
 						if (spot) spot.shape = sSnap.shape;
@@ -475,6 +491,7 @@
 			const area = zone.areas.find(a => a.id === (editModeTarget as any).areaId);
 			if (area) {
 				area.shape = editModeOriginalShapes.shape;
+				area.labelPosition = editModeOriginalShapes.labelPosition;
 				for (const sSnap of editModeOriginalShapes.spots) {
 					const spot = area.spots.find(s => s.id === sSnap.id);
 					if (spot) spot.shape = sSnap.shape;
@@ -568,6 +585,7 @@
 	}
 
 	function selectEditModeItem(item: 'shape' | 'overlay') {
+		if (addSpotDrawing) return;
 		if (editModeSelection === item) return;
 		deselectEditModeItem();
 		if (item === 'shape' && editModeLayer) {
@@ -1015,10 +1033,25 @@
 		});
 	}
 
+	function snapshotOverlayState(): any {
+		if (!overlayLayer) {
+			return { hasOverlay: false, imageUrl: overlayImageUrl, opacity: overlayOpacity, rotation: overlayRotation, bounds: null };
+		}
+		const b = overlayLayer.getBounds();
+		return {
+			hasOverlay: true,
+			imageUrl: overlayImageUrl,
+			opacity: overlayOpacity,
+			rotation: overlayRotation,
+			bounds: [[b.getSouth(), b.getWest()], [b.getNorth(), b.getEast()]]
+		};
+	}
+
 	function pushUndoSnapshot() {
 		if (!editModeTarget) return;
 		const snap = snapshotEditModeShapes(editModeTarget);
 		if (snap) {
+			snap.overlay = snapshotOverlayState();
 			undoStack.push(snap);
 			undoStack = undoStack; // trigger reactivity
 			redoStack = [];
@@ -1032,10 +1065,12 @@
 
 		if (editModeTarget.type === 'zone') {
 			zone.shape = snap.shape;
+			zone.labelPosition = snap.labelPosition;
 			for (const aSnap of snap.areas) {
 				const area = zone.areas.find((a: any) => a.id === aSnap.id);
 				if (area) {
 					area.shape = aSnap.shape;
+					area.labelPosition = aSnap.labelPosition;
 					for (const sSnap of aSnap.spots) {
 						const spot = area.spots.find((s: any) => s.id === sSnap.id);
 						if (spot) spot.shape = sSnap.shape;
@@ -1046,6 +1081,7 @@
 			const area = zone.areas.find((a: any) => a.id === (editModeTarget as any).areaId);
 			if (area) {
 				area.shape = snap.shape;
+				area.labelPosition = snap.labelPosition;
 				for (const sSnap of snap.spots) {
 					const spot = area.spots.find((s: any) => s.id === sSnap.id);
 					if (spot) spot.shape = sSnap.shape;
@@ -1060,12 +1096,32 @@
 		venue = { ...venue };
 		deselectEditModeItem();
 		renderEditModeShapes();
+
+		// Restore overlay state if present in snapshot
+		if (snap.overlay) {
+			if (editModeSelection === 'overlay') editModeSelection = null;
+			if (snap.overlay.hasOverlay && snap.overlay.bounds) {
+				overlayOpacity = snap.overlay.opacity;
+				overlayRotation = snap.overlay.rotation;
+				overlayImageUrl = snap.overlay.imageUrl;
+				removeOverlayFromMap();
+				addOverlayToMap(snap.overlay.bounds);
+				persistOverlay();
+			} else if (!snap.overlay.hasOverlay) {
+				removeOverlayFromMap();
+				overlayImageUrl = '';
+				overlayOpacity = 0.5;
+				overlayRotation = 0;
+				clearOverlayStorage(venue.id);
+			}
+		}
 	}
 
 	function undo() {
 		if (!editModeTarget || undoStack.length === 0) return;
 		const currentSnap = snapshotEditModeShapes(editModeTarget);
 		if (currentSnap) {
+			currentSnap.overlay = snapshotOverlayState();
 			redoStack.push(currentSnap);
 			redoStack = redoStack;
 		}
@@ -1078,6 +1134,7 @@
 		if (!editModeTarget || redoStack.length === 0) return;
 		const currentSnap = snapshotEditModeShapes(editModeTarget);
 		if (currentSnap) {
+			currentSnap.overlay = snapshotOverlayState();
 			undoStack.push(currentSnap);
 			undoStack = undoStack;
 		}
@@ -1304,6 +1361,35 @@
 			removeOverlayDragHandlers();
 		}
 		editModeSelection = null;
+		shapeToolboxPanel = null;
+	}
+
+	function addDraggableLabelMarker(entity: Zone | Area, level: string, converter?: GeoConverter) {
+		if (!entity.labelPosition || !map) return;
+		const L = (window as any).L;
+		const lp = converter
+			? converter.pixelToLatLng(entity.labelPosition.x, entity.labelPosition.y)
+			: { lat: entity.labelPosition.y, lng: entity.labelPosition.x };
+		const cssClass = level === 'zone' ? 'label-zone' : 'label-area';
+		const icon = L.divIcon({
+			className: `label-drag-marker ${cssClass}`,
+			html: `<span>${entity.name}</span>`,
+			iconSize: [0, 0],
+			iconAnchor: [0, 0],
+		});
+		labelMarker = L.marker([lp.lat, lp.lng], { icon, draggable: true, zIndexOffset: 1000 }).addTo(map);
+		let dragUndoPushed = false;
+		labelMarker.on('dragstart', () => {
+			if (!dragUndoPushed) { pushUndoSnapshot(); dragUndoPushed = true; }
+		});
+		labelMarker.on('dragend', () => {
+			const pos = labelMarker.getLatLng();
+			entity.labelPosition = converter
+				? converter.latLngToPixel(pos.lat, pos.lng)
+				: { x: pos.lng, y: pos.lat };
+			venue = { ...venue };
+			dragUndoPushed = false;
+		});
 	}
 
 	function renderEditModeShapes() {
@@ -1314,6 +1400,7 @@
 		if (!zone) return;
 
 		// Clear existing
+		if (labelMarker) { map.removeLayer(labelMarker); labelMarker = null; }
 		for (const sl of shapeLayers) {
 			map.removeLayer(sl);
 		}
@@ -1322,11 +1409,12 @@
 
 		if (editModeTarget.type === 'zone') {
 			// Editing a zone: show zone + all its areas + spots
-			const zoneLayer = shapeDefToLayer(zone.shape, zone.style, zone.name, 'zone', converter);
+			const zoneLayer = shapeDefToLayer(zone.shape, zone.style, zone.name, 'zone', converter, zone.labelPosition);
 			if (zoneLayer) {
 				zoneLayer.addTo(map);
 				shapeLayers.push(zoneLayer);
 				editModeLayer = zoneLayer;
+				if (zone.labelPosition) { zoneLayer.unbindTooltip(); addDraggableLabelMarker(zone, 'zone', converter); }
 				zoneLayer.on('click', () => {
 					zoneClickedFlag = true;
 					setTimeout(() => zoneClickedFlag = false, 0);
@@ -1334,7 +1422,7 @@
 				});
 			}
 			for (const area of zone.areas) {
-				const areaLayer = shapeDefToLayer(area.shape, area.style, area.name, 'area', converter);
+				const areaLayer = shapeDefToLayer(area.shape, area.style, area.name, 'area', converter, area.labelPosition);
 				if (areaLayer) { areaLayer.addTo(map); shapeLayers.push(areaLayer); }
 				for (const spot of area.spots) {
 					const spotLayer = shapeDefToLayer(spot.shape, spot.style, spot.name, 'spot', converter);
@@ -1345,11 +1433,12 @@
 			// Editing an area: show only the area + its spots
 			const area = zone.areas.find(a => a.id === (editModeTarget as any).areaId);
 			if (!area) return;
-			const areaLayer = shapeDefToLayer(area.shape, area.style, area.name, 'area', converter);
+			const areaLayer = shapeDefToLayer(area.shape, area.style, area.name, 'area', converter, area.labelPosition);
 			if (areaLayer) {
 				areaLayer.addTo(map);
 				shapeLayers.push(areaLayer);
 				editModeLayer = areaLayer;
+				if (area.labelPosition) { areaLayer.unbindTooltip(); addDraggableLabelMarker(area, 'area', converter); }
 				areaLayer.on('click', () => {
 					zoneClickedFlag = true;
 					setTimeout(() => zoneClickedFlag = false, 0);
@@ -1358,12 +1447,27 @@
 			}
 			for (const spot of area.spots) {
 				const spotLayer = shapeDefToLayer(spot.shape, spot.style, spot.name, 'spot', converter);
-				if (spotLayer) { spotLayer.addTo(map); shapeLayers.push(spotLayer); }
+				if (spotLayer) {
+					spotLayer.addTo(map);
+					shapeLayers.push(spotLayer);
+					// Make spot clickable to enter spot edit mode
+					const el = spotLayer.getElement?.();
+					if (el) el.style.cursor = 'pointer';
+					spotLayer.on('click', () => {
+						zoneClickedFlag = true;
+						setTimeout(() => zoneClickedFlag = false, 0);
+						switchToEditTarget({ type: 'spot', zoneId: editModeTarget!.zoneId, areaId: (editModeTarget as any).areaId, spotId: spot.id });
+					});
+				}
 			}
 		} else if (editModeTarget.type === 'spot') {
-			// Editing a spot: show only the spot with vertex editing
+			// Editing a spot: show the parent area as background + the spot
 			const area = zone.areas.find(a => a.id === (editModeTarget as any).areaId);
 			if (!area) return;
+			const areaLayer = shapeDefToLayer(area.shape, area.style, area.name, 'area', converter, area.labelPosition);
+			if (areaLayer) {
+				areaLayer.addTo(map);
+			}
 			const spot = area.spots.find(s => s.id === (editModeTarget as any).spotId);
 			if (!spot) return;
 			const spotLayer = shapeDefToLayer(spot.shape, spot.style, spot.name, 'spot', converter);
@@ -1388,7 +1492,7 @@
 			const zone = venue.zones.find(z => z.id === editModeTarget.zoneId);
 			if (zone) {
 				if (editModeTarget.type === 'zone') {
-					Object.assign(zone, { name: editModeOriginalEntity.name, category: editModeOriginalEntity.category, style: editModeOriginalEntity.style, shape: editModeOriginalEntity.shape });
+					Object.assign(zone, { name: editModeOriginalEntity.name, category: editModeOriginalEntity.category, style: editModeOriginalEntity.style, shape: editModeOriginalEntity.shape, labelPosition: editModeOriginalEntity.labelPosition });
 					// Restore child areas/spots if they were part of the snapshot
 					if (editModeOriginalEntity.areas) {
 						zone.areas = editModeOriginalEntity.areas;
@@ -1396,7 +1500,7 @@
 				} else if (editModeTarget.type === 'area') {
 					const area = zone.areas.find(a => a.id === (editModeTarget as any).areaId);
 					if (area) {
-						Object.assign(area, { name: editModeOriginalEntity.name, category: editModeOriginalEntity.category, style: editModeOriginalEntity.style, shape: editModeOriginalEntity.shape });
+						Object.assign(area, { name: editModeOriginalEntity.name, category: editModeOriginalEntity.category, style: editModeOriginalEntity.style, shape: editModeOriginalEntity.shape, labelPosition: editModeOriginalEntity.labelPosition });
 						if (editModeOriginalEntity.spots) {
 							area.spots = editModeOriginalEntity.spots;
 						}
@@ -1415,8 +1519,66 @@
 		exitEditMode(false);
 	}
 
+	function startAddSpotDraw() {
+		if (!map || !addSpotName.trim()) return;
+		addSpotDrawing = true;
+		deselectEditModeItem();
+		map.pm.enableDraw('Polygon', {
+			pathOptions: {
+				color: '#cbd5e1',
+				weight: 1,
+				fillColor: CATEGORY_COLORS['info'],
+				fillOpacity: 0.8
+			}
+		});
+	}
+
+	function cancelAddSpot() {
+		addingSpot = false;
+		addSpotName = '';
+		if (addSpotDrawing) {
+			map?.pm.disableDraw();
+			addSpotDrawing = false;
+		}
+	}
+
+	function completeAddSpot(layer: any) {
+		if (!editModeTarget || editModeTarget.type !== 'area') return;
+		const zone = venue.zones.find(z => z.id === editModeTarget.zoneId);
+		if (!zone) return;
+		const area = zone.areas.find(a => a.id === (editModeTarget as any).areaId);
+		if (!area) return;
+
+		let shapeDef = layerToShapeDef(layer);
+		const converter = getGeoConverter();
+		if (converter) shapeDef = converter.shapeToPixel(shapeDef);
+
+		pushUndoSnapshot();
+		const spot: Spot = {
+			id: generateId('spot'),
+			name: addSpotName.trim(),
+			description: '',
+			category: 'info',
+			shape: shapeDef,
+			style: defaultStyle('spot', 'info')
+		};
+		area.spots = [...area.spots, spot];
+		venue = { ...venue };
+
+		// Remove the drawn layer (we re-render from data)
+		map.removeLayer(layer);
+		addingSpot = false;
+		addSpotName = '';
+		addSpotDrawing = false;
+		renderEditModeShapes();
+	}
+
 	function exitEditMode(save = true) {
 		if (!editMode) return;
+
+		placingLabel = false;
+		if (labelMarker) { map?.removeLayer(labelMarker); labelMarker = null; }
+		cancelAddSpot();
 
 		// Cancel any active redraw first
 		if (redrawActive) cancelRedraw();
@@ -1486,13 +1648,21 @@
 		}, 50);
 	}
 
+	function switchToEditTarget(target: EditingTarget) {
+		exitEditMode(true);
+		enterEditModeForTarget(target);
+	}
+
 	// Side panel handlers (work for both zone and area editing)
 	function panelUpdateName() {
 		const entity = getEditModeEntity();
 		if (entity && panelName.trim()) {
 			entity.name = panelName.trim();
 			venue = { ...venue };
-			if (editModeLayer) {
+			if (labelMarker) {
+				const el = labelMarker.getElement();
+				if (el) { const span = el.querySelector('span'); if (span) span.textContent = entity.name; }
+			} else if (editModeLayer) {
 				const level = editModeTarget?.type ?? 'zone';
 				const cls = `label-${level}`;
 				editModeLayer.unbindTooltip();
@@ -1768,6 +1938,7 @@
 		if (!file) return;
 		const reader = new FileReader();
 		reader.onload = () => {
+			pushUndoSnapshot();
 			overlayImageUrl = reader.result as string;
 			addOverlayToMap();
 			persistOverlay();
@@ -1809,6 +1980,10 @@
 		}, 50);
 	}
 
+	function onOverlayOpacityStart() {
+		pushUndoSnapshot();
+	}
+
 	function updateOverlayOpacity() {
 		if (overlayLayer) {
 			overlayLayer.setOpacity(overlayOpacity);
@@ -1828,6 +2003,7 @@
 	}
 
 	function clearOverlay() {
+		pushUndoSnapshot();
 		if (editModeSelection === 'overlay') editModeSelection = null;
 		removeOverlayFromMap();
 		if (overlayImageUrl.startsWith('blob:')) {
@@ -1841,6 +2017,7 @@
 
 	function resetOverlay() {
 		if (!overlayLayer || !map || !overlayImageUrl) return;
+		pushUndoSnapshot();
 		const wasSelected = editModeSelection === 'overlay';
 		if (wasSelected) deselectEditModeItem();
 		overlayRotation = 0;
@@ -1958,6 +2135,7 @@
 				zIndexOffset: 10000
 			}).addTo(map);
 
+			marker.on('dragstart', () => pushUndoSnapshot());
 			marker.on('drag', () => handleCornerDrag(i, marker.getLatLng()));
 			marker.on('dragend', () => handleCornerDragEnd());
 			overlayCornerMarkers.push(marker);
@@ -2069,6 +2247,7 @@
 
 		const onRotateDown = (e: any) => {
 			if (!overlayLayer || editModeSelection !== 'overlay') return;
+			pushUndoSnapshot();
 			e.stopPropagation();
 			e.preventDefault();
 			map.dragging.disable();
@@ -2217,6 +2396,7 @@
 				zIndexOffset: 10000
 			}).addTo(map);
 
+			marker.on('dragstart', () => pushUndoSnapshot());
 			marker.on('drag', () => {
 				const dragLatLng = marker.getLatLng();
 				// Constrain handle to move only perpendicular to its edge
@@ -2366,6 +2546,7 @@
 
 		const onImgDown = (e: any) => {
 			if (!overlayLayer || editModeSelection !== 'overlay') return;
+			pushUndoSnapshot();
 
 			// Stop propagation at DOM level AND Leaflet level
 			e.stopPropagation();
@@ -2757,7 +2938,7 @@
 
 		for (const zone of zonesToRender) {
 			for (const area of zone.areas) {
-				const areaLayer = shapeDefToLayer(area.shape, area.style, area.name, 'area', converter);
+				const areaLayer = shapeDefToLayer(area.shape, area.style, area.name, 'area', converter, area.labelPosition);
 				if (areaLayer) {
 					areaLayer.addTo(map);
 					shapeLayers.push(areaLayer);
@@ -2836,7 +3017,7 @@
 		}
 	}
 
-	function shapeDefToLayer(shape: ShapeDef, style: ShapeStyle, name: string, level: string, converter?: GeoConverter): any {
+	function shapeDefToLayer(shape: ShapeDef, style: ShapeStyle, name: string, level: string, converter?: GeoConverter, labelPosition?: { x: number; y: number }): any {
 		const L = (window as any).L;
 
 		// Convert pixel coords to lat/lng for display when in GPS mode
@@ -2868,21 +3049,33 @@
 		}
 
 		if (level === 'zone') {
-			layer.bindTooltip(name, { permanent: true, direction: 'right', className: 'label-zone' });
+			const zoneDir = labelPosition ? 'center' : 'right';
+			layer.bindTooltip(name, { permanent: true, direction: zoneDir, className: 'label-zone' });
 			layer.on('add', function () {
-				const bounds = this.getBounds();
-				const topLeft = converter ? bounds.getNorthWest() : bounds.getSouthWest();
-				if (this.getTooltip()) {
-					this.getTooltip().setLatLng(topLeft);
+				if (labelPosition) {
+					const lp = converter
+						? converter.pixelToLatLng(labelPosition.x, labelPosition.y)
+						: { lat: labelPosition.y, lng: labelPosition.x };
+					this.getTooltip()?.setLatLng([lp.lat, lp.lng]);
+				} else {
+					const bounds = this.getBounds();
+					const topLeft = converter ? bounds.getNorthWest() : bounds.getSouthWest();
+					this.getTooltip()?.setLatLng(topLeft);
 				}
 			});
 		} else if (level === 'area') {
-			layer.bindTooltip(name, { permanent: true, direction: 'top', className: 'label-area', offset: [0, 0] });
+			const areaDir = labelPosition ? 'center' : 'top';
+			layer.bindTooltip(name, { permanent: true, direction: areaDir, className: 'label-area', offset: [0, 0] });
 			layer.on('add', function () {
-				const bounds = this.getBounds();
-				const topLeft = converter ? bounds.getNorthWest() : bounds.getSouthWest();
-				if (this.getTooltip()) {
-					this.getTooltip().setLatLng(topLeft);
+				if (labelPosition) {
+					const lp = converter
+						? converter.pixelToLatLng(labelPosition.x, labelPosition.y)
+						: { lat: labelPosition.y, lng: labelPosition.x };
+					this.getTooltip()?.setLatLng([lp.lat, lp.lng]);
+				} else {
+					const bounds = this.getBounds();
+					const topLeft = converter ? bounds.getNorthWest() : bounds.getSouthWest();
+					this.getTooltip()?.setLatLng(topLeft);
 				}
 			});
 		} else if (level === 'spot') {
@@ -3042,15 +3235,29 @@
 		// Listen for shape creation
 		map.on('pm:create', (e: any) => {
 			if (redrawActive) { completeRedraw(e.layer); return; }
+			if (addSpotDrawing) { completeAddSpot(e.layer); return; }
 			pendingLayer = e.layer;
 			showDialog = true;
 		});
 
 		// Click on map background deselects zone/area
 		map.on('click', (e: any) => {
+			if (placingLabel && editModeTarget && editModeTarget.type !== 'spot') {
+				const converter = getGeoConverter();
+				const pos = converter
+					? converter.latLngToPixel(e.latlng.lat, e.latlng.lng)
+					: { x: e.latlng.lng, y: e.latlng.lat };
+				pushUndoSnapshot();
+				const entity = getEditModeEntity() as Zone | Area | undefined;
+				if (entity) entity.labelPosition = pos;
+				venue = { ...venue };
+				placingLabel = false;
+				renderEditModeShapes();
+				return;
+			}
 			if (zoneClickedFlag) return;
 			if (editMode) {
-				if (redrawActive) return; // don't select anything during redraw
+				if (redrawActive || addSpotDrawing) return; // don't select anything during draw
 				// If click is within overlay bounds, select overlay
 				if (overlayLayer && overlayLayer.getBounds().contains(e.latlng) && editModeSelection !== 'overlay') {
 					selectEditModeItem('overlay');
@@ -3078,6 +3285,7 @@
 		// Safety net: if draw ends without creating a shape during redraw, cancel
 		map.on('pm:drawend', () => {
 			if (redrawActive && !redrawRestarting) cancelRedraw();
+			if (addSpotDrawing) { addSpotDrawing = false; }
 		});
 
 		renderExistingShapes();
@@ -3216,7 +3424,7 @@
 	{/if}
 
 	<div class="map-area-wrapper">
-		<div class="map-area" bind:this={mapContainer} style="--vertex-size: {vertexSize}px;"></div>
+		<div class="map-area" class:placing-label={placingLabel} bind:this={mapContainer} style="--vertex-size: {vertexSize}px;"></div>
 
 		<div class="fab-column" bind:this={fabColumnEl}>
 			{#if venueGeoBounds}
@@ -3385,33 +3593,161 @@
 			{/if}
 		{/if}
 
+		{#if editMode && editModeSelection === 'shape'}
+			<!-- svelte-ignore a11y_no_static_element_interactions -->
+			<!-- svelte-ignore a11y_click_events_have_key_events -->
+			<div class="shape-toolbox" onmousedown={(e) => e.stopPropagation()} onclick={(e) => e.stopPropagation()}>
+				<div class="stb-item">
+					<button
+						class="stb-swatch"
+						style="background: {panelFill}; opacity: {panelOpacity};"
+						title="Fill color"
+						onclick={() => { shapeToolboxPanel = shapeToolboxPanel === 'fill' ? null : 'fill'; }}
+					></button>
+					{#if shapeToolboxPanel === 'fill'}
+						<div class="stb-popover">
+							<span class="stb-popover-title">Fill Color</span>
+							<div class="stb-popover-grid">
+								{#each colorSwatches as c}
+									<button
+										class="zt-swatch"
+										class:active={panelFill === c}
+										style="background: {c}"
+										title={c}
+										onclick={() => { panelFill = c; panelApplyStyle(); }}
+									></button>
+								{/each}
+								<input type="color" class="zt-color-input" bind:value={panelFill} oninput={panelApplyStyle} />
+							</div>
+							<div class="stb-opacity-row">
+								<span class="stb-label">Opacity</span>
+								<input type="range" class="zt-range stb-range" min="0.1" max="1" step="0.05" bind:value={panelOpacity} oninput={panelApplyStyle} />
+								<span class="zt-range-val">{panelOpacity.toFixed(2)}</span>
+							</div>
+						</div>
+					{/if}
+				</div>
+
+				<div class="stb-item">
+					<button
+						class="stb-swatch stb-stroke-swatch"
+						style="border-color: {panelStroke};"
+						title="Stroke color"
+						onclick={() => { shapeToolboxPanel = shapeToolboxPanel === 'stroke' ? null : 'stroke'; }}
+					></button>
+					{#if shapeToolboxPanel === 'stroke'}
+						<div class="stb-popover">
+							<span class="stb-popover-title">Stroke Color</span>
+							<div class="stb-popover-grid">
+								{#each strokeSwatches as c}
+									<button
+										class="zt-swatch"
+										class:active={panelStroke === c}
+										style="background: {c}"
+										title={c}
+										onclick={() => { panelStroke = c; panelApplyStyle(); }}
+									></button>
+								{/each}
+								<input type="color" class="zt-color-input" bind:value={panelStroke} oninput={panelApplyStyle} />
+							</div>
+							<div class="stb-opacity-row">
+								<span class="stb-label">Width</span>
+								<input type="range" class="zt-range stb-range" min="0" max="5" step="0.5" bind:value={panelStrokeWidth} oninput={panelApplyStyle} />
+								<span class="zt-range-val">{panelStrokeWidth}</span>
+							</div>
+						</div>
+					{/if}
+				</div>
+
+				{#if redrawActive}
+					<button class="stb-btn" title="Cancel redraw" onclick={cancelRedraw}>
+						<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+							<line x1="18" y1="6" x2="6" y2="18"></line>
+							<line x1="6" y1="6" x2="18" y2="18"></line>
+						</svg>
+					</button>
+				{:else}
+					<button class="stb-btn" title="Redraw shape" onclick={startRedraw}>
+						<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+							<polygon points="16 3 21 8 8 21 3 21 3 16 16 3"></polygon>
+						</svg>
+					</button>
+				{/if}
+			</div>
+		{/if}
+
 	</div>
 
 	{#if editMode && editModeTarget}
 		{@const editEntity = getEditModeEntity()}
 		{@const isAreaEdit = editModeTarget.type === 'area'}
+		{@const isSpotEdit = editModeTarget.type === 'spot'}
 		{@const editZone = venue.zones.find(z => z.id === editModeTarget.zoneId)}
 		{#if editEntity}
 		<!-- svelte-ignore a11y_no_static_element_interactions -->
 		<!-- svelte-ignore a11y_click_events_have_key_events -->
 		<div class="side-panel" class:redraw-active={redrawActive} onclick={(e) => e.stopPropagation()}>
 			<div class="sp-header">
-				<span class="sp-title">Edit {isAreaEdit ? 'Area' : 'Zone'}</span>
+				<span class="sp-title">Edit {isSpotEdit ? 'Spot' : isAreaEdit ? 'Area' : 'Zone'}</span>
 				<div class="sp-header-spacer"></div>
 				<button class="sp-close" onclick={discardEditMode} title="Discard changes">&#x2715;</button>
 			</div>
 
 			<div class="sp-body">
 
+			{#if isSpotEdit}
+				<button class="sp-back-btn" onclick={() => switchToEditTarget({ type: 'area', zoneId: editModeTarget.zoneId, areaId: (editModeTarget as any).areaId })}>
+					&#x2190; Back to Area
+				</button>
+			{/if}
+
 			<div class="sp-section">
-				<span class="sp-section-label">{isAreaEdit ? 'Area' : 'Zone'} Name</span>
-				<input
-					class="sp-input"
-					type="text"
-					bind:value={panelName}
-					oninput={panelUpdateName}
-				/>
+				<span class="sp-section-label">{isSpotEdit ? 'Spot' : isAreaEdit ? 'Area' : 'Zone'} Name</span>
+				{#if !isSpotEdit}
+					<div class="sp-name-row">
+						<input
+							class="sp-input"
+							type="text"
+							bind:value={panelName}
+							oninput={panelUpdateName}
+						/>
+						<button class="sp-label-place-btn" class:active={placingLabel}
+							onclick={() => { placingLabel = !placingLabel; }}
+							title="Place label on map"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><line x1="12" y1="2" x2="12" y2="6"/><line x1="12" y1="18" x2="12" y2="22"/><line x1="2" y1="12" x2="6" y2="12"/><line x1="18" y1="12" x2="22" y2="12"/></svg></button>
+					</div>
+					{#if placingLabel}
+						<span class="sp-label-hint">Click on map to place label</span>
+					{/if}
+					{#if (editEntity as any).labelPosition}
+						<button class="sp-label-reset" onclick={() => {
+							pushUndoSnapshot();
+							(editEntity as any).labelPosition = undefined;
+							venue = { ...venue };
+							renderEditModeShapes();
+						}}>Reset label position</button>
+					{/if}
+				{:else}
+					<input
+						class="sp-input"
+						type="text"
+						bind:value={panelName}
+						oninput={panelUpdateName}
+					/>
+				{/if}
 			</div>
+
+			{#if isSpotEdit}
+				<div class="sp-section">
+					<span class="sp-section-label">Description</span>
+					<textarea
+						class="sp-input sp-textarea"
+						bind:value={panelDescription}
+						oninput={panelUpdateDescription}
+						rows="2"
+						placeholder="Enter description..."
+					></textarea>
+				</div>
+			{/if}
 
 			<div class="sp-section">
 				<span class="sp-section-label">Category</span>
@@ -3430,65 +3766,13 @@
 			</div>
 
 			<div class="sp-section">
-				<span class="sp-section-label">Fill</span>
-				<div class="sp-color-grid">
-					{#each colorSwatches as c}
-						<button
-							class="zt-swatch"
-							class:active={panelFill === c}
-							style="background: {c}"
-							title={c}
-							onclick={() => { panelFill = c; panelApplyStyle(); }}
-						></button>
-					{/each}
-					<input type="color" class="zt-color-input" bind:value={panelFill} oninput={panelApplyStyle} />
-				</div>
-			</div>
-
-			<div class="sp-section">
-				<span class="sp-section-label">Opacity</span>
-				<div class="sp-style-row">
-					<input type="range" class="zt-range sp-range-full" min="0.1" max="1" step="0.05" bind:value={panelOpacity} oninput={panelApplyStyle} />
-					<span class="zt-range-val">{panelOpacity.toFixed(2)}</span>
-				</div>
-			</div>
-
-			<div class="sp-section sp-section-stroke">
-				<span class="sp-section-label">Stroke</span>
-				<div class="sp-color-grid">
-					{#each strokeSwatches as c}
-						<button
-							class="zt-swatch"
-							class:active={panelStroke === c}
-							style="background: {c}"
-							title={c}
-							onclick={() => { panelStroke = c; panelApplyStyle(); }}
-						></button>
-					{/each}
-					<input type="color" class="zt-color-input" bind:value={panelStroke} oninput={panelApplyStyle} />
-				</div>
-				<div class="sp-style-row">
-					<input type="range" class="zt-range sp-range-full" min="0" max="5" step="0.5" bind:value={panelStrokeWidth} oninput={panelApplyStyle} />
-					<span class="zt-range-val">{panelStrokeWidth}</span>
-				</div>
-			</div>
-
-			<div class="sp-section sp-section-redraw">
 				<span class="sp-section-label">Shape</span>
-				{#if redrawActive}
-					<div class="sp-redraw-hint">Click on map to draw a new polygon. Press Escape to cancel.</div>
-					<button class="zt-btn" onclick={cancelRedraw}>Cancel Redraw</button>
-				{:else}
-					<div class="sp-shape-actions">
-						<button class="zt-btn" onclick={startRedraw}>Redraw Shape</button>
-						<button class="zt-btn sp-btn-reset" onclick={resetEditModeShapes}>Reset Shape</button>
-					</div>
-				{/if}
-				<div class="sp-style-row" style="margin-top: 8px;">
+				<div class="sp-style-row">
 					<span class="sp-section-label" style="margin-bottom: 0; font-size: 11px;">Vertex Size</span>
 					<input type="range" class="zt-range sp-range-full" min="20" max="50" step="1" bind:value={vertexSize} oninput={() => localStorage.setItem('mapEditor:vertexSize', String(vertexSize))} />
 					<span class="zt-range-val">{vertexSize}</span>
 				</div>
+				<button class="zt-btn sp-btn-reset" onclick={resetEditModeShapes}>Reset Shape</button>
 			</div>
 
 			<div class="sp-section sp-section-overlay">
@@ -3500,7 +3784,7 @@
 					</div>
 					<div class="sp-style-row">
 						<span class="sp-overlay-label">Opacity</span>
-						<input type="range" class="zt-range sp-range-full" min="0" max="1" step="0.05" bind:value={overlayOpacity} oninput={updateOverlayOpacity} />
+						<input type="range" class="zt-range sp-range-full" min="0" max="1" step="0.05" bind:value={overlayOpacity} oninput={updateOverlayOpacity} onpointerdown={onOverlayOpacityStart} />
 						<span class="zt-range-val">{overlayOpacity.toFixed(2)}</span>
 					</div>
 					<button class="zt-btn sp-btn-reset" onclick={resetOverlay}>Reset Image</button>
@@ -3517,15 +3801,43 @@
 				{#if editArea}
 				<div class="sp-section">
 					<span class="sp-section-label">Spots ({editArea.spots.length})</span>
-					<div class="sp-area-list">
-						{#each editArea.spots as spot}
-							<div class="sp-area-item">
-								<span class="sp-cat-dot" style="background: {CATEGORY_COLORS[spot.category]}"></span>
-								<span class="sp-area-name">{spot.name}</span>
-								<span class="sp-area-cat">{spot.category}</span>
+					<div class="sp-spot-list">
+						{#if addingSpot}
+							<div class="sp-add-spot-form">
+								{#if addSpotDrawing}
+									<span class="sp-add-spot-hint">Draw the spot shape on the map</span>
+									<button class="zt-btn sp-add-spot-cancel" onclick={cancelAddSpot}>Cancel</button>
+								{:else}
+									<input
+										class="sp-input"
+										type="text"
+										placeholder="Spot name..."
+										bind:value={addSpotName}
+										onkeydown={(e) => { if (e.key === 'Enter' && addSpotName.trim()) startAddSpotDraw(); if (e.key === 'Escape') cancelAddSpot(); }}
+									/>
+									<div class="sp-add-spot-actions">
+										<button class="zt-btn zt-btn-primary" onclick={startAddSpotDraw} disabled={!addSpotName.trim()}>Draw</button>
+										<button class="zt-btn" onclick={cancelAddSpot}>Cancel</button>
+									</div>
+								{/if}
 							</div>
+						{:else}
+							<button class="sp-spot-card sp-spot-add-row" onclick={() => { addingSpot = true; addSpotName = ''; }}>
+								<span class="sp-spot-add-icon">+</span>
+								<span class="sp-spot-add-text">Add Spot</span>
+							</button>
+						{/if}
+						{#each editArea.spots as spot}
+							<button class="sp-spot-card" onclick={() => switchToEditTarget({ type: 'spot', zoneId: editModeTarget.zoneId, areaId: (editModeTarget as any).areaId, spotId: spot.id })}>
+								<span class="sp-spot-dot" style="background: {CATEGORY_COLORS[spot.category]}"></span>
+								<div class="sp-spot-info">
+									<span class="sp-spot-name">{spot.name}</span>
+									<span class="sp-spot-cat">{spot.category}</span>
+								</div>
+								<span class="sp-area-arrow">&#x203A;</span>
+							</button>
 						{/each}
-						{#if editArea.spots.length === 0}
+						{#if editArea.spots.length === 0 && !addingSpot}
 							<span class="sp-empty">No spots</span>
 						{/if}
 					</div>
@@ -3933,6 +4245,142 @@
 		font-size: 11px;
 		color: #64748b;
 		text-transform: capitalize;
+	}
+
+	.sp-area-item-clickable {
+		cursor: pointer;
+		font-family: inherit;
+		text-align: left;
+		transition: background 0.15s;
+	}
+	.sp-area-item-clickable:hover {
+		background: #1e293b;
+		border-color: #475569;
+	}
+
+	.sp-area-arrow {
+		color: #64748b;
+		font-size: 16px;
+		font-weight: 600;
+	}
+
+	/* Spot cards (bigger style) */
+	.sp-add-spot-form {
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+		padding: 10px;
+		background: #0f172a;
+		border: 1px solid #475569;
+		border-radius: 6px;
+		margin-bottom: 8px;
+	}
+	.sp-add-spot-actions {
+		display: flex;
+		gap: 6px;
+	}
+	.sp-add-spot-hint {
+		font-size: 12px;
+		color: #facc15;
+	}
+	.sp-add-spot-cancel {
+		align-self: flex-start;
+	}
+	.sp-spot-add-row {
+		border-style: dashed;
+		border-color: #475569;
+		justify-content: center;
+		gap: 6px;
+	}
+	.sp-spot-add-row:hover {
+		border-color: #60a5fa;
+		background: #1e293b;
+	}
+	.sp-spot-add-icon {
+		font-size: 18px;
+		font-weight: 600;
+		color: #60a5fa;
+		line-height: 1;
+	}
+	.sp-spot-add-text {
+		font-size: 13px;
+		font-weight: 500;
+		color: #94a3b8;
+	}
+	.sp-spot-add-row:hover .sp-spot-add-text {
+		color: #e2e8f0;
+	}
+	.sp-spot-list {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+	}
+	.sp-spot-card {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		padding: 12px 14px;
+		background: #0f172a;
+		border: 1px solid #334155;
+		border-radius: 8px;
+		cursor: pointer;
+		font-family: inherit;
+		text-align: left;
+		transition: background 0.15s, border-color 0.15s;
+	}
+	.sp-spot-card:hover {
+		background: #1e293b;
+		border-color: #475569;
+	}
+	.sp-spot-dot {
+		width: 12px;
+		height: 12px;
+		border-radius: 50%;
+		flex-shrink: 0;
+	}
+	.sp-spot-info {
+		flex: 1;
+		min-width: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+	}
+	.sp-spot-name {
+		font-size: 14px;
+		font-weight: 500;
+		color: #e2e8f0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	.sp-spot-cat {
+		font-size: 11px;
+		color: #64748b;
+		text-transform: capitalize;
+	}
+
+	.sp-back-btn {
+		display: flex;
+		align-items: center;
+		gap: 4px;
+		padding: 6px 10px;
+		margin-bottom: 4px;
+		background: none;
+		border: none;
+		color: #60a5fa;
+		font-size: 12px;
+		font-family: inherit;
+		cursor: pointer;
+		border-radius: 4px;
+	}
+	.sp-back-btn:hover {
+		background: #1e293b;
+	}
+
+	.sp-textarea {
+		resize: vertical;
+		min-height: 40px;
+		font-family: inherit;
 	}
 
 	.sp-empty {
@@ -4642,6 +5090,153 @@
 	}
 	:global(.map-area .marker-icon-middle:hover) {
 		opacity: 1;
+	}
+
+	/* Label placement */
+	.sp-name-row { display: flex; gap: 6px; align-items: center; }
+	.sp-name-row .sp-input { flex: 1; }
+	.sp-label-place-btn {
+		width: 32px; height: 32px;
+		background: #1e293b; border: 1px solid #334155;
+		border-radius: 6px; color: #94a3b8;
+		font-size: 16px; cursor: pointer;
+		display: flex; align-items: center; justify-content: center;
+		flex-shrink: 0;
+	}
+	.sp-label-place-btn:hover { background: #334155; color: #e2e8f0; }
+	.sp-label-place-btn.active { background: #facc15; color: #000; border-color: #facc15; }
+	.sp-label-hint {
+		font-size: 11px; color: #facc15; margin-top: 4px; display: block;
+	}
+	.sp-label-reset {
+		font-size: 11px; color: #94a3b8; background: none; border: none;
+		cursor: pointer; padding: 0; margin-top: 4px; text-decoration: underline;
+	}
+	.sp-label-reset:hover { color: #e2e8f0; }
+	.placing-label { cursor: crosshair !important; }
+	:global(.label-drag-marker) {
+		cursor: grab !important;
+		white-space: nowrap;
+	}
+	:global(.label-drag-marker span) {
+		position: relative;
+		left: -50%;
+		pointer-events: auto;
+		padding: 2px 6px;
+		border-radius: 3px;
+		background: rgba(0,0,0,0.5);
+	}
+	:global(.label-drag-marker.label-zone span) {
+		font-weight: 600;
+		font-size: 12px;
+	}
+	:global(.label-drag-marker.label-area span) {
+		font-weight: 500;
+		font-size: 11px;
+	}
+	:global(.leaflet-dragging .label-drag-marker) {
+		cursor: grabbing !important;
+	}
+
+	/* Shape toolbox (center-bottom of canvas) */
+	.shape-toolbox {
+		position: absolute;
+		bottom: 16px;
+		left: 50%;
+		transform: translateX(-50%);
+		z-index: 600;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		gap: 6px;
+		background: #1e293b;
+		border: 1px solid #334155;
+		border-radius: 10px;
+		padding: 6px 8px;
+		box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+		pointer-events: auto;
+	}
+	.stb-item {
+		position: relative;
+	}
+	.stb-swatch {
+		width: 28px;
+		height: 28px;
+		border-radius: 6px;
+		border: 2px solid #475569;
+		cursor: pointer;
+		padding: 0;
+		transition: transform 0.1s;
+	}
+	.stb-swatch:hover {
+		transform: scale(1.12);
+	}
+	.stb-stroke-swatch {
+		background: transparent;
+		border-width: 3px;
+	}
+	.stb-btn {
+		width: 28px;
+		height: 28px;
+		border-radius: 6px;
+		border: 1px solid #334155;
+		background: #0f172a;
+		color: #94a3b8;
+		cursor: pointer;
+		padding: 0;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		transition: all 0.12s;
+	}
+	.stb-btn:hover {
+		background: #334155;
+		color: #f1f5f9;
+	}
+	.stb-popover {
+		position: absolute;
+		bottom: calc(100% + 8px);
+		left: 50%;
+		transform: translateX(-50%);
+		background: #1e293b;
+		border: 1px solid #334155;
+		border-radius: 10px;
+		padding: 10px;
+		box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+		min-width: 200px;
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+	}
+	.stb-popover-title {
+		font-size: 11px;
+		font-weight: 600;
+		color: #94a3b8;
+		text-transform: uppercase;
+		letter-spacing: 0.04em;
+	}
+	.stb-popover-grid {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 4px;
+		align-items: center;
+	}
+	.stb-opacity-row {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+	}
+	.stb-label {
+		font-size: 11px;
+		color: #94a3b8;
+		font-weight: 600;
+		text-transform: uppercase;
+		width: 48px;
+		flex-shrink: 0;
+	}
+	.stb-range {
+		max-width: none;
+		flex: 1;
 	}
 
 </style>
