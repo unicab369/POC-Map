@@ -2937,6 +2937,113 @@
 			: venue.zones;
 
 		for (const zone of zonesToRender) {
+			// Render zone shape
+			const zoneLayer = shapeDefToLayer(zone.shape, zone.style, zone.name, 'zone', converter, zone.labelPosition);
+			if (zoneLayer) {
+				zoneLayer.addTo(map);
+				shapeLayers.push(zoneLayer);
+				zoneLayerMap.set(zone.id, zoneLayer);
+
+				const handleZoneClick = () => {
+					zoneClickedFlag = true;
+					setTimeout(() => zoneClickedFlag = false, 0);
+					if (editingTarget?.type === 'zone' && editingTarget.zoneId === zone.id) {
+						deselectZone();
+					} else {
+						selectZoneForDrag(zone.id, zoneLayer);
+					}
+				};
+				zoneLayer.on('click', handleZoneClick);
+				makeTooltipClickable(zoneLayer, handleZoneClick);
+
+				// Move-handle marker at bottom-center of zone bounds
+				const bounds = zoneLayer.getBounds();
+				const bottomCenter = L.latLng(bounds.getSouth(), (bounds.getWest() + bounds.getEast()) / 2);
+				const moveIcon = L.divIcon({
+					className: 'zone-move-handle-container',
+					html: `<div class="zone-move-handle"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="5 9 2 12 5 15"/><polyline points="9 5 12 2 15 5"/><polyline points="15 19 12 22 9 19"/><polyline points="19 9 22 12 19 15"/><line x1="2" y1="12" x2="22" y2="12"/><line x1="12" y1="2" x2="12" y2="22"/></svg></div>`,
+					iconSize: [28, 28],
+					iconAnchor: [14, 14],
+				});
+				const moveMarker = L.marker(bottomCenter, { icon: moveIcon, interactive: true, draggable: true, zIndexOffset: 500 }).addTo(map);
+				shapeLayers.push(moveMarker);
+
+				let markerDragPrev: any = null;
+				let markerDragStart: any = null;
+
+				moveMarker.on('dragstart', () => {
+					isDragging = true;
+					markerDragStart = moveMarker.getLatLng();
+					markerDragPrev = markerDragStart;
+
+					// Visual selection
+					deselectEntity();
+					zoneLayer.setStyle({ weight: 3, dashArray: '6 4', color: '#facc15' });
+				});
+
+				moveMarker.on('drag', () => {
+					if (!markerDragPrev) return;
+					const cur = moveMarker.getLatLng();
+					const dlat = cur.lat - markerDragPrev.lat;
+					const dlng = cur.lng - markerDragPrev.lng;
+
+					// Shift zone layer
+					if (zoneLayer.getLatLngs) {
+						const latlngs = zoneLayer.getLatLngs()[0].map((ll: any) => L.latLng(ll.lat + dlat, ll.lng + dlng));
+						zoneLayer.setLatLngs(latlngs);
+					} else if (zoneLayer.setBounds) {
+						const b = zoneLayer.getBounds();
+						zoneLayer.setBounds(L.latLngBounds(
+							[b.getSouth() + dlat, b.getWest() + dlng],
+							[b.getNorth() + dlat, b.getEast() + dlng]
+						));
+					}
+
+					markerDragPrev = cur;
+				});
+
+				moveMarker.on('dragend', () => {
+					if (markerDragStart) {
+						const end = moveMarker.getLatLng();
+						const conv = getGeoConverter();
+
+						// Compute pixel delta from the lat/lng movement
+						let dx: number, dy: number;
+						if (conv) {
+							const startPx = conv.latLngToPixel(markerDragStart.lat, markerDragStart.lng);
+							const endPx = conv.latLngToPixel(end.lat, end.lng);
+							dx = endPx.x - startPx.x;
+							dy = endPx.y - startPx.y;
+						} else {
+							dx = end.lng - markerDragStart.lng;
+							dy = end.lat - markerDragStart.lat;
+						}
+
+						const z = venue.zones.find(zn => zn.id === zone.id);
+						if (z) {
+							z.shape = applyDelta(z.shape, dx, dy);
+							for (const a of z.areas) {
+								a.shape = applyDelta(a.shape, dx, dy);
+								for (const s of a.spots) {
+									s.shape = applyDelta(s.shape, dx, dy);
+								}
+							}
+						}
+						venue = { ...venue };
+					}
+					markerDragPrev = null;
+					markerDragStart = null;
+					isDragging = false;
+					renderExistingShapes();
+				});
+
+				// Click without drag → select zone for toolbar
+				moveMarker.on('click', (e: any) => {
+					L.DomEvent.stopPropagation(e);
+					selectZoneForDrag(zone.id, zoneLayer);
+				});
+			}
+
 			for (const area of zone.areas) {
 				const areaLayer = shapeDefToLayer(area.shape, area.style, area.name, 'area', converter, area.labelPosition);
 				if (areaLayer) {
@@ -4927,6 +5034,31 @@
 
 	:global(.label-spot) {
 		font-size: 10px !important;
+	}
+
+	:global(.zone-move-handle-container) {
+		background: transparent !important;
+		border: none !important;
+		box-shadow: none !important;
+	}
+	:global(.zone-move-handle) {
+		width: 28px;
+		height: 28px;
+		background: #1e293b;
+		border: 2px solid #475569;
+		border-radius: 6px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		cursor: pointer;
+		color: #94a3b8;
+		box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+		transition: all 0.15s;
+	}
+	:global(.zone-move-handle:hover) {
+		background: #334155;
+		color: #f1f5f9;
+		border-color: #818cf8;
 	}
 
 	/* Geocoder FAB styling — lives inside .fab-column */
