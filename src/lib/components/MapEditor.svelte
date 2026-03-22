@@ -19,7 +19,6 @@
 	let fabColumnEl: HTMLDivElement;
 	let map: any;
 	let shapeLayers: any[] = [];
-	let floorBackgroundLayer: any = null;
 	let venueGeoBounds = $state<any>(null); // Leaflet LatLngBounds for "back to venue"
 
 	type DrawLevel = 'zone' | 'area' | 'spot';
@@ -38,6 +37,10 @@
 
 	// Zone layer lookup (zoneId → Leaflet layer)
 	let zoneLayerMap = new Map<string, any>();
+
+	// Suppress moveend view saves during zone switching
+	let suppressViewSave = false;
+
 
 	// Zone drag-to-move state
 	let editingZoneId = $state<string>('');
@@ -554,7 +557,6 @@
 		// Hide tiles and floor background (unless user toggled map on)
 		if (!editModeShowMap) {
 			tileLayerRef?.remove();
-			floorBackgroundLayer?.remove();
 		}
 
 		// Clear all shape layers
@@ -1613,7 +1615,6 @@
 
 		// Re-add tile layer and floor background
 		if (tileLayerRef && map) tileLayerRef.addTo(map);
-		if (floorBackgroundLayer && map) floorBackgroundLayer.addTo(map);
 
 		venue = { ...venue };
 		renderExistingShapes();
@@ -1725,11 +1726,9 @@
 		if (!editMode || !map) return;
 		if (editModeShowMap) {
 			tileLayerRef?.addTo(map);
-			floorBackgroundLayer?.addTo(map);
 			for (const sl of shapeLayers) sl.bringToFront();
 		} else {
 			tileLayerRef?.remove();
-			floorBackgroundLayer?.remove();
 		}
 	}
 
@@ -2785,8 +2784,14 @@
 		const zone = venue.zones.find(z => z.id === editingZoneId);
 		if (zone) {
 			zone.shape = applyDelta(zone.shape, delta.dx, delta.dy);
+			if (zone.labelPosition) {
+				zone.labelPosition = { x: zone.labelPosition.x + delta.dx, y: zone.labelPosition.y + delta.dy };
+			}
 			for (const area of zone.areas) {
 				area.shape = applyDelta(area.shape, delta.dx, delta.dy);
+				if (area.labelPosition) {
+					area.labelPosition = { x: area.labelPosition.x + delta.dx, y: area.labelPosition.y + delta.dy };
+				}
 				for (const spot of area.spots) {
 					spot.shape = applyDelta(spot.shape, delta.dx, delta.dy);
 				}
@@ -2846,10 +2851,30 @@
 		if (!map) return;
 		if (activeZoneId === zoneId) return;
 
+		// Save current view for the zone we're leaving (before changing activeZoneId)
+		const center = map.getCenter();
+		const zoom = map.getZoom();
+		localStorage.setItem(`mapEditor:view:${venue.id}:${activeZoneId}`, JSON.stringify({ lat: center.lat, lng: center.lng, zoom }));
+
+		// Suppress moveend saves during the switch (cleared async after all events settle)
+		suppressViewSave = true;
+
 		activeZoneId = zoneId;
 		deselectEntity();
 		deselectZone();
 		renderExistingShapes();
+
+		// Restore saved view for the zone we're switching to
+		const saved = localStorage.getItem(`mapEditor:view:${venue.id}:${zoneId}`);
+		if (saved) {
+			try {
+				const v = JSON.parse(saved);
+				map.setView([v.lat, v.lng], v.zoom, { animate: false });
+			} catch {}
+		}
+
+		// Clear suppression after all async Leaflet events have settled
+		setTimeout(() => { suppressViewSave = false; }, 100);
 	}
 
 	function addShapeToVenue(shapeDef: ShapeDef, name: string, category: POICategory, description: string) {
@@ -2937,6 +2962,8 @@
 			: venue.zones;
 
 		for (const zone of zonesToRender) {
+			const zoneChildLayers: any[] = [];
+
 			// Render zone shape
 			const zoneLayer = shapeDefToLayer(zone.shape, zone.style, zone.name, 'zone', converter, zone.labelPosition);
 			if (zoneLayer) {
@@ -2979,6 +3006,13 @@
 					// Visual selection
 					deselectEntity();
 					zoneLayer.setStyle({ weight: 3, dashArray: '6 4', color: '#facc15' });
+
+					// Hide zone tooltip and child layers (areas/spots) during drag
+					zoneLayer.unbindTooltip();
+					for (const cl of zoneChildLayers) {
+						cl.setStyle?.({ opacity: 0, fillOpacity: 0 });
+						cl.unbindTooltip?.();
+					}
 				});
 
 				moveMarker.on('drag', () => {
@@ -2987,16 +3021,16 @@
 					const dlat = cur.lat - markerDragPrev.lat;
 					const dlng = cur.lng - markerDragPrev.lng;
 
-					// Shift zone layer
-					if (zoneLayer.getLatLngs) {
-						const latlngs = zoneLayer.getLatLngs()[0].map((ll: any) => L.latLng(ll.lat + dlat, ll.lng + dlng));
-						zoneLayer.setLatLngs(latlngs);
-					} else if (zoneLayer.setBounds) {
+					// Shift zone layer — use setBounds for Rectangle, setLatLngs for Polygon
+					if (zoneLayer.setBounds && zoneLayer instanceof L.Rectangle) {
 						const b = zoneLayer.getBounds();
 						zoneLayer.setBounds(L.latLngBounds(
 							[b.getSouth() + dlat, b.getWest() + dlng],
 							[b.getNorth() + dlat, b.getEast() + dlng]
 						));
+					} else if (zoneLayer.getLatLngs) {
+						const latlngs = zoneLayer.getLatLngs()[0].map((ll: any) => L.latLng(ll.lat + dlat, ll.lng + dlng));
+						zoneLayer.setLatLngs(latlngs);
 					}
 
 					markerDragPrev = cur;
@@ -3022,8 +3056,14 @@
 						const z = venue.zones.find(zn => zn.id === zone.id);
 						if (z) {
 							z.shape = applyDelta(z.shape, dx, dy);
+							if (z.labelPosition) {
+								z.labelPosition = { x: z.labelPosition.x + dx, y: z.labelPosition.y + dy };
+							}
 							for (const a of z.areas) {
 								a.shape = applyDelta(a.shape, dx, dy);
+								if (a.labelPosition) {
+									a.labelPosition = { x: a.labelPosition.x + dx, y: a.labelPosition.y + dy };
+								}
 								for (const s of a.spots) {
 									s.shape = applyDelta(s.shape, dx, dy);
 								}
@@ -3049,6 +3089,7 @@
 				if (areaLayer) {
 					areaLayer.addTo(map);
 					shapeLayers.push(areaLayer);
+					zoneChildLayers.push(areaLayer);
 
 					const handleAreaClick = () => {
 						zoneClickedFlag = true;
@@ -3087,6 +3128,7 @@
 					if (spotLayer) {
 						spotLayer.addTo(map);
 						shapeLayers.push(spotLayer);
+						zoneChildLayers.push(spotLayer);
 
 						const handleSpotClick = () => {
 							zoneClickedFlag = true;
@@ -3256,13 +3298,6 @@
 				[venue.geoBounds.ne[0], venue.geoBounds.ne[1]]
 			);
 
-			// Semi-transparent floor background rectangle
-			floorBackgroundLayer = L.rectangle(geoBounds, {
-				color: '#94a3b8',
-				weight: 2,
-				fillColor: venue.color,
-				fillOpacity: 0.3
-			}).addTo(map);
 
 			// Add search/geocoder control
 			const Geocoder = (L.Control as any).Geocoder;
@@ -3289,10 +3324,6 @@
 
 			venueGeoBounds = geoBounds;
 
-			setTimeout(() => {
-				map.invalidateSize();
-				map.fitBounds(geoBounds);
-			}, 0);
 			map.fitBounds(geoBounds);
 		} else {
 			// Pixel mode (fallback): Y-down CRS, no tiles
@@ -3309,18 +3340,8 @@
 
 			const bounds = [[0, 0], [venue.height, venue.width]];
 
-			setTimeout(() => {
-				map.invalidateSize();
-				map.fitBounds(bounds);
-			}, 0);
 			map.fitBounds(bounds);
 
-			floorBackgroundLayer = L.rectangle(bounds, {
-				color: '#94a3b8',
-				weight: 2,
-				fillColor: venue.color,
-				fillOpacity: 1
-			}).addTo(map);
 		}
 
 		// Enable geoman without toolbar UI
@@ -3397,22 +3418,27 @@
 
 		renderExistingShapes();
 
-		// Restore persisted map view (center + zoom)
-		const savedView = localStorage.getItem(`mapEditor:view:${venue.id}`);
-		if (savedView) {
-			try {
-				const { lat, lng, zoom } = JSON.parse(savedView);
-				map.setView([lat, lng], zoom, { animate: false });
-			} catch {}
-		}
-
-		// Persist map view on move/zoom
+		// Persist map view on move/zoom, per venue + zone
 		map.on('moveend', () => {
-			if (!map) return;
+			if (!map || suppressViewSave) return;
 			const center = map.getCenter();
 			const zoom = map.getZoom();
-			localStorage.setItem(`mapEditor:view:${venue.id}`, JSON.stringify({ lat: center.lat, lng: center.lng, zoom }));
+			localStorage.setItem(`mapEditor:view:${venue.id}:${activeZoneId}`, JSON.stringify({ lat: center.lat, lng: center.lng, zoom }));
 		});
+
+		// Restore persisted map view after map has fully initialized
+		suppressViewSave = true;
+		setTimeout(() => {
+			map.invalidateSize();
+			const savedView = localStorage.getItem(`mapEditor:view:${venue.id}:${activeZoneId}`);
+			if (savedView) {
+				try {
+					const v = JSON.parse(savedView);
+					map.setView([v.lat, v.lng], v.zoom, { animate: false });
+				} catch {}
+			}
+			suppressViewSave = false;
+		}, 50);
 
 		// Auto-enter edit mode if initialEditTarget was provided
 		if (initialEditTarget) {
