@@ -13,7 +13,6 @@ export const mallVenue: Venue = {
 		{
 			id: 'ground-floor',
 			name: 'Ground Floor',
-			category: 'info',
 			zoneType: 'floor',
 			level: 0,
 			shape: { type: 'rect', x: 0, y: 0, width: 700, height: 400 },
@@ -77,7 +76,6 @@ export const mallVenue: Venue = {
 		{
 			id: 'first-floor',
 			name: 'First Floor',
-			category: 'attraction',
 			zoneType: 'floor',
 			level: 1,
 			shape: { type: 'rect', x: 0, y: 0, width: 700, height: 400 },
@@ -139,7 +137,6 @@ export const mallVenue: Venue = {
 		{
 			id: 'second-floor',
 			name: 'Second Floor',
-			category: 'shop',
 			zoneType: 'floor',
 			level: 2,
 			shape: { type: 'rect', x: 0, y: 0, width: 700, height: 400 },

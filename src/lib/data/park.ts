@@ -13,7 +13,6 @@ export const parkVenue: Venue = {
 		{
 			id: 'entrance-plaza',
 			name: 'Entrance Plaza',
-			category: 'info',
 			shape: { type: 'rect', x: 300, y: 480, width: 200, height: 100 },
 			style: { fill: '#fef3c7', opacity: 0.85 },
 			areas: [
@@ -34,7 +33,6 @@ export const parkVenue: Venue = {
 		{
 			id: 'adventure-land',
 			name: 'Adventure Land',
-			category: 'attraction',
 			shape: { type: 'rect', x: 20, y: 20, width: 250, height: 220 },
 			style: { fill: '#dbeafe', opacity: 0.85 },
 			areas: [
@@ -64,7 +62,6 @@ export const parkVenue: Venue = {
 		{
 			id: 'fantasy-world',
 			name: 'Fantasy World',
-			category: 'attraction',
 			shape: { type: 'rect', x: 530, y: 20, width: 250, height: 220 },
 			style: { fill: '#ede9fe', opacity: 0.85 },
 			areas: [
@@ -85,7 +82,6 @@ export const parkVenue: Venue = {
 		{
 			id: 'water-park',
 			name: 'Water Park',
-			category: 'attraction',
 			shape: { type: 'rect', x: 20, y: 280, width: 250, height: 180 },
 			style: { fill: '#cffafe', opacity: 0.85 },
 			areas: [
@@ -105,7 +101,6 @@ export const parkVenue: Venue = {
 		{
 			id: 'food-court',
 			name: 'Food Court',
-			category: 'food',
 			shape: { type: 'rect', x: 300, y: 280, width: 200, height: 180 },
 			style: { fill: '#ffedd5', opacity: 0.85 },
 			areas: [
@@ -127,7 +122,6 @@ export const parkVenue: Venue = {
 		{
 			id: 'gift-village',
 			name: 'Gift Village',
-			category: 'shop',
 			shape: { type: 'rect', x: 530, y: 280, width: 250, height: 180 },
 			style: { fill: '#fce7f3', opacity: 0.85 },
 			areas: [

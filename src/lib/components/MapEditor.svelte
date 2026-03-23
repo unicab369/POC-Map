@@ -98,6 +98,11 @@
 	let addSpotName = $state('');
 	let addSpotDrawing = $state(false); // true when polygon draw is active
 
+	// Add-area-in-edit-mode state
+	let addingArea = $state(false);
+	let addAreaName = $state('');
+	let addAreaDrawing = $state(false);
+
 	// Relocate zone state
 	let relocatingZoneId = $state<string>('');
 
@@ -111,6 +116,9 @@
 	let redoStack = $state<any[]>([]);
 	let canUndo = $derived(undoStack.length > 0);
 	let canRedo = $derived(redoStack.length > 0);
+
+	// Derived: any polygon draw mode is active (redraw, add area, add spot)
+	let isDrawingPolygon = $derived(redrawActive || addAreaDrawing || addSpotDrawing);
 
 	// Edit mode map visibility (persisted)
 	let editModeShowMap = $state(false);
@@ -195,12 +203,8 @@
 			return;
 		}
 
-		const containerRect = mapContainer.getBoundingClientRect();
-		// All entity types: bottom-center of the map container
-		toolbarPosition = {
-			x: containerRect.width / 2,
-			y: containerRect.height - 20
-		};
+		// Use a simple flag — the toolbar uses CSS bottom/left positioning
+		toolbarPosition = { x: 0, y: 0 };
 	}
 
 	function resetToolbarSubState() {
@@ -471,6 +475,7 @@
 
 	function handleDelete() {
 		if (!editingTarget) return;
+		const wasInEditMode = editMode;
 		if (editingTarget.type === 'zone') {
 			venue.zones = venue.zones.filter(z => z.id !== editingTarget!.zoneId);
 		} else if (editingTarget.type === 'area') {
@@ -488,8 +493,12 @@
 		}
 		venue = { ...venue };
 		deselectEntity();
-		deselectZone();
-		renderExistingShapes();
+		if (wasInEditMode) {
+			renderEditModeShapes();
+		} else {
+			deselectZone();
+			renderExistingShapes();
+		}
 	}
 
 	const colorSwatches = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#10b981', '#3b82f6', '#8b5cf6', '#ec4899', '#6b7280', '#1e293b', '#ffffff', '#fbbf24', '#0ea5e9'];
@@ -605,7 +614,7 @@
 
 		// Initialize side panel state from entity
 		panelName = entity.name;
-		panelCategory = entity.category;
+		panelCategory = 'category' in entity ? entity.category : 'info';
 		panelFill = entity.style.fill;
 		panelOpacity = entity.style.opacity ?? 0.85;
 		panelStroke = entity.style.stroke ?? '#cbd5e1';
@@ -631,7 +640,7 @@
 		renderEditModeShapes();
 
 		// Restore saved overlay
-		const savedOverlay = loadOverlay(venue.id);
+		const savedOverlay = loadOverlay(editModeTarget.zoneId);
 		if (savedOverlay) {
 			overlayImageUrl = savedOverlay.imageDataUrl;
 			overlayOpacity = savedOverlay.opacity;
@@ -649,7 +658,7 @@
 	}
 
 	function selectEditModeItem(item: 'shape' | 'overlay') {
-		if (addSpotDrawing) return;
+		if (addSpotDrawing || addAreaDrawing) return;
 		if (editModeSelection === item) return;
 		deselectEditModeItem();
 		if (item === 'shape' && editModeLayer) {
@@ -1483,6 +1492,7 @@
 				zoneLayer.on('click', () => {
 					zoneClickedFlag = true;
 					setTimeout(() => zoneClickedFlag = false, 0);
+					if (editingTarget) deselectEntity(); // deselect any selected area/spot
 					selectEditModeItem('shape');
 				});
 			}
@@ -1497,6 +1507,7 @@
 					const handleAreaClick = () => {
 						zoneClickedFlag = true;
 						setTimeout(() => zoneClickedFlag = false, 0);
+						deselectEditModeItem(); // deselect zone shape toolbox
 						if (editingTarget?.type === 'area' && editingTarget.areaId === area.id) {
 							deselectEntity();
 						} else {
@@ -1682,12 +1693,12 @@
 	function discardEditMode() {
 		if (!editMode || !editModeTarget) return;
 
-		// Restore original entity (name, category, style, shape, description)
+		// Restore original entity (name, style, shape, description)
 		if (editModeOriginalEntity) {
 			const zone = venue.zones.find(z => z.id === editModeTarget.zoneId);
 			if (zone) {
 				if (editModeTarget.type === 'zone') {
-					Object.assign(zone, { name: editModeOriginalEntity.name, category: editModeOriginalEntity.category, style: editModeOriginalEntity.style, shape: editModeOriginalEntity.shape, labelPosition: editModeOriginalEntity.labelPosition });
+					Object.assign(zone, { name: editModeOriginalEntity.name, style: editModeOriginalEntity.style, shape: editModeOriginalEntity.shape, labelPosition: editModeOriginalEntity.labelPosition });
 					// Restore child areas/spots if they were part of the snapshot
 					if (editModeOriginalEntity.areas) {
 						zone.areas = editModeOriginalEntity.areas;
@@ -1717,6 +1728,8 @@
 	function startAddSpotDraw() {
 		if (!map || !addSpotName.trim()) return;
 		addSpotDrawing = true;
+		redrawUndoneVertices = [];
+		redrawVertexCount = 0;
 		deselectEditModeItem();
 		map.pm.enableDraw('Polygon', {
 			pathOptions: {
@@ -1726,14 +1739,18 @@
 				fillOpacity: 0.8
 			}
 		});
+		map.on('pm:vertexadded', onRedrawVertexAdded);
 	}
 
 	function cancelAddSpot() {
 		addingSpot = false;
 		addSpotName = '';
 		if (addSpotDrawing) {
+			map?.off('pm:vertexadded', onRedrawVertexAdded);
 			map?.pm.disableDraw();
 			addSpotDrawing = false;
+			redrawUndoneVertices = [];
+			redrawVertexCount = 0;
 		}
 	}
 
@@ -1762,9 +1779,72 @@
 
 		// Remove the drawn layer (we re-render from data)
 		map.removeLayer(layer);
+		map.off('pm:vertexadded', onRedrawVertexAdded);
 		addingSpot = false;
 		addSpotName = '';
 		addSpotDrawing = false;
+		redrawUndoneVertices = [];
+		redrawVertexCount = 0;
+		renderEditModeShapes();
+	}
+
+	function startAddAreaDraw() {
+		if (!map || !addAreaName.trim()) return;
+		addAreaDrawing = true;
+		redrawUndoneVertices = [];
+		redrawVertexCount = 0;
+		deselectEditModeItem();
+		map.pm.enableDraw('Polygon', {
+			pathOptions: {
+				color: '#cbd5e1',
+				weight: 1,
+				fillColor: CATEGORY_COLORS['info'],
+				fillOpacity: 0.7
+			}
+		});
+		map.on('pm:vertexadded', onRedrawVertexAdded);
+	}
+
+	function cancelAddArea() {
+		addingArea = false;
+		addAreaName = '';
+		if (addAreaDrawing) {
+			map?.off('pm:vertexadded', onRedrawVertexAdded);
+			map?.pm.disableDraw();
+			addAreaDrawing = false;
+			redrawUndoneVertices = [];
+			redrawVertexCount = 0;
+		}
+	}
+
+	function completeAddArea(layer: any) {
+		if (!editModeTarget || editModeTarget.type !== 'zone') return;
+		const zone = venue.zones.find(z => z.id === editModeTarget.zoneId);
+		if (!zone) return;
+
+		let shapeDef = layerToShapeDef(layer);
+		const converter = getGeoConverter();
+		if (converter) shapeDef = converter.shapeToPixel(shapeDef);
+
+		pushUndoSnapshot();
+		const area: Area = {
+			id: generateId('area'),
+			name: addAreaName.trim(),
+			category: 'info',
+			shape: shapeDef,
+			style: defaultStyle('area', 'info'),
+			spots: []
+		};
+		zone.areas = [...zone.areas, area];
+		venue = { ...venue };
+
+		map.removeLayer(layer);
+		map.off('pm:vertexadded', onRedrawVertexAdded);
+		addingArea = false;
+		addAreaName = '';
+		addAreaDrawing = false;
+		redrawUndoneVertices = [];
+		redrawVertexCount = 0;
 		renderEditModeShapes();
 	}
 
@@ -1915,7 +1995,7 @@
 	}
 
 	function onRedrawVertexAdded(e: any) {
-		if (!redrawActive || !map) return;
+		if (!isDrawingPolygon || !map) return;
 		const marker = e.marker;
 		const workingLayer = e.workingLayer;
 		if (!marker || !workingLayer) return;
@@ -1952,7 +2032,26 @@
 	function restartRedrawWith(vertices: Array<{ lat: number; lng: number }>) {
 		if (!map) return;
 		const L = (window as any).L;
-		const entity = getEditModeEntity();
+
+		// Determine path options based on active drawing mode
+		let pathOptions: any;
+		if (redrawActive) {
+			const entity = getEditModeEntity();
+			pathOptions = {
+				color: entity?.style.stroke ?? '#cbd5e1',
+				weight: entity?.style.strokeWidth ?? 1,
+				fillColor: entity?.style.fill ?? '#3b82f6',
+				fillOpacity: entity?.style.opacity ?? 0.6
+			};
+		} else {
+			// addAreaDrawing or addSpotDrawing — use default draw styles
+			pathOptions = {
+				color: '#cbd5e1',
+				weight: 1,
+				fillColor: CATEGORY_COLORS['info'],
+				fillOpacity: addSpotDrawing ? 0.8 : 0.7
+			};
+		}
 
 		// Stop current draw (removes all markers/layers)
 		redrawRestarting = true;
@@ -1961,14 +2060,7 @@
 		map.off('pm:vertexadded', onRedrawVertexAdded);
 
 		// Re-enable draw
-		map.pm.enableDraw('Polygon', {
-			pathOptions: {
-				color: entity?.style.stroke ?? '#cbd5e1',
-				weight: entity?.style.strokeWidth ?? 1,
-				fillColor: entity?.style.fill ?? '#3b82f6',
-				fillOpacity: entity?.style.opacity ?? 0.6
-			}
-		});
+		map.pm.enableDraw('Polygon', { pathOptions });
 		map.on('pm:vertexadded', onRedrawVertexAdded);
 
 		// Re-place each vertex
@@ -1983,7 +2075,7 @@
 	}
 
 	function redrawUndo() {
-		if (!map || !redrawActive) return;
+		if (!map || !isDrawingPolygon) return;
 		const vertices = getRedrawVertices();
 		if (vertices.length === 0) return;
 
@@ -1996,7 +2088,7 @@
 	}
 
 	function redrawRedo() {
-		if (!map || !redrawActive || redrawUndoneVertices.length === 0) return;
+		if (!map || !isDrawingPolygon || redrawUndoneVertices.length === 0) return;
 		const vertices = getRedrawVertices();
 
 		// Pop from redo stack
@@ -2211,7 +2303,7 @@
 	function persistOverlay() {
 		if (!overlayImageUrl || !overlayLayer) return;
 		const bounds = overlayLayer.getBounds();
-		saveOverlay(venue.id, {
+		saveOverlay(editModeTarget!.zoneId, {
 			imageDataUrl: overlayImageUrl,
 			opacity: overlayOpacity,
 			rotation: overlayRotation,
@@ -2974,7 +3066,7 @@
 
 	function handleKeydown(e: KeyboardEvent) {
 		if ((e.metaKey || e.ctrlKey) && e.key === 'z') {
-			if (redrawActive) {
+			if (isDrawingPolygon) {
 				e.preventDefault();
 				if (e.shiftKey) { redrawRedo(); } else { redrawUndo(); }
 				return;
@@ -3050,9 +3142,8 @@
 			const zone: Zone = {
 				id: generateId('zone'),
 				name,
-				category,
 				shape: shapeDef,
-				style: defaultStyle('zone', category),
+				style: { fill: '#3b82f6', opacity: 0.85, stroke: '#cbd5e1', strokeWidth: 1 },
 				areas: []
 			};
 			venue.zones = [...venue.zones, zone];
@@ -3388,6 +3479,7 @@
 		map.on('pm:create', (e: any) => {
 			if (redrawActive) { completeRedraw(e.layer); return; }
 			if (addSpotDrawing) { completeAddSpot(e.layer); return; }
+			if (addAreaDrawing) { completeAddArea(e.layer); return; }
 			pendingLayer = e.layer;
 			showDialog = true;
 		});
@@ -3413,7 +3505,7 @@
 			}
 			if (zoneClickedFlag) return;
 			if (editMode) {
-				if (redrawActive || addSpotDrawing) return; // don't select anything during draw
+				if (redrawActive || addSpotDrawing || addAreaDrawing) return; // don't select anything during draw
 				// Deselect area/spot toolbar if active
 				if (editingTarget) deselectEntity();
 				// If click is within overlay bounds, select overlay
@@ -3442,8 +3534,10 @@
 
 		// Safety net: if draw ends without creating a shape during redraw, cancel
 		map.on('pm:drawend', () => {
-			if (redrawActive && !redrawRestarting) cancelRedraw();
+			if (redrawRestarting) return; // undo/redo restart — ignore
+			if (redrawActive) cancelRedraw();
 			if (addSpotDrawing) { addSpotDrawing = false; }
+			if (addAreaDrawing) { addAreaDrawing = false; }
 		});
 
 		renderExistingShapes();
@@ -3643,9 +3737,9 @@
 			<div class="fab-row-bottom-right">
 				<button
 					class="map-fab"
-					onclick={(e) => { e.stopPropagation(); redrawActive ? redrawUndo() : undo(); }}
+					onclick={(e) => { e.stopPropagation(); isDrawingPolygon ? redrawUndo() : undo(); }}
 					title="Undo"
-					disabled={!redrawActive && !canUndo}
+					disabled={!isDrawingPolygon && !canUndo}
 				>
 					<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
 						<polyline points="1 4 1 10 7 10"></polyline>
@@ -3654,9 +3748,9 @@
 				</button>
 				<button
 					class="map-fab"
-					onclick={(e) => { e.stopPropagation(); redrawActive ? redrawRedo() : redo(); }}
+					onclick={(e) => { e.stopPropagation(); isDrawingPolygon ? redrawRedo() : redo(); }}
 					title="Redo"
-					disabled={!redrawActive && !canRedo}
+					disabled={!isDrawingPolygon && !canRedo}
 				>
 					<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
 						<polyline points="23 4 23 10 17 10"></polyline>
@@ -3672,15 +3766,13 @@
 		</div>
 	{/if}
 
-	{#if toolbarPosition && editingTarget && !isDragging && (!editMode || (editingTarget.type === 'area' || editingTarget.type === 'spot'))}
+	{#if toolbarPosition && editingTarget && !isDragging && (!editMode || editingTarget.type === 'area' || editingTarget.type === 'spot')}
 			{@const editingEntity = getEditingEntity()}
 			{#if editingEntity}
 				<!-- svelte-ignore a11y_no_static_element_interactions -->
 			<!-- svelte-ignore a11y_click_events_have_key_events -->
 				<div
-					class="zone-toolbar"
-					class:zone-toolbar-bottom={true}
-					style="left: {toolbarPosition.x}px; top: {toolbarPosition.y}px;"
+					class="zone-toolbar zone-toolbar-bottom"
 					onmousedown={(e) => e.stopPropagation()}
 					onclick={(e) => e.stopPropagation()}
 				>
@@ -3762,6 +3854,14 @@
 							</div>
 						</div>
 						<button class="zt-btn zt-btn-primary" onclick={handleStyleConfirm}>Done</button>
+					{:else if editMode}
+						<!-- Edit mode: area/spot selected — show Edit + Remove only -->
+						<button class="zt-btn zt-btn-primary" onclick={() => { const target = { ...editingTarget }; deselectEntity(); switchToEditTarget(target); }} title="Edit">
+							<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+						</button>
+						<button class="zt-btn zt-btn-danger" onclick={() => deleteConfirming = true} title="Remove">
+							<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+						</button>
 					{:else}
 						<button class="zt-btn zt-btn-primary" onclick={enterEditMode} title="Edit">
 							<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
@@ -3878,8 +3978,8 @@
 		<!-- svelte-ignore a11y_click_events_have_key_events -->
 		<div class="side-panel" class:redraw-active={redrawActive} onclick={(e) => e.stopPropagation()}>
 			<div class="sp-header">
+				<div class="sp-header-balance"></div>
 				<span class="sp-title">Edit {isSpotEdit ? 'Spot' : isAreaEdit ? 'Area' : 'Zone'}</span>
-				<div class="sp-header-spacer"></div>
 				<button class="sp-close" onclick={discardEditMode} title="Discard changes">&#x2715;</button>
 			</div>
 
@@ -3939,21 +4039,16 @@
 				</div>
 			{/if}
 
+			{#if isAreaEdit || isSpotEdit}
 			<div class="sp-section">
 				<span class="sp-section-label">Category</span>
-				<div class="sp-cat-grid">
+				<select class="sp-select" value={panelCategory} onchange={(e) => panelUpdateCategory(e.currentTarget.value)}>
 					{#each categories as cat}
-						<button
-							class="sp-cat-chip"
-							class:active={panelCategory === cat}
-							onclick={() => panelUpdateCategory(cat)}
-						>
-							<span class="sp-cat-dot" style="background: {CATEGORY_COLORS[cat]}"></span>
-							{cat}
-						</button>
+						<option value={cat}>{cat}</option>
 					{/each}
-				</div>
+				</select>
 			</div>
+			{/if}
 
 			<div class="sp-section">
 				<span class="sp-section-label">Shape</span>
@@ -4037,6 +4132,31 @@
 				<div class="sp-section">
 					<span class="sp-section-label">Areas ({editZone.areas.length})</span>
 					<div class="sp-area-list">
+						{#if addingArea}
+							<div class="sp-add-spot-form">
+								{#if addAreaDrawing}
+									<span class="sp-add-spot-hint">Draw the area shape on the map</span>
+									<button class="zt-btn sp-add-spot-cancel" onclick={cancelAddArea}>Cancel</button>
+								{:else}
+									<input
+										class="sp-input"
+										type="text"
+										placeholder="Area name..."
+										bind:value={addAreaName}
+										onkeydown={(e) => { if (e.key === 'Enter' && addAreaName.trim()) startAddAreaDraw(); if (e.key === 'Escape') cancelAddArea(); }}
+									/>
+									<div class="sp-add-spot-actions">
+										<button class="zt-btn zt-btn-primary" onclick={startAddAreaDraw} disabled={!addAreaName.trim()}>Draw</button>
+										<button class="zt-btn" onclick={cancelAddArea}>Cancel</button>
+									</div>
+								{/if}
+							</div>
+						{:else}
+							<button class="sp-spot-card sp-spot-add-row" onclick={() => { addingArea = true; addAreaName = ''; }}>
+								<span class="sp-spot-add-icon">+</span>
+								<span class="sp-spot-add-text">Add Area</span>
+							</button>
+						{/if}
 						{#each editZone.areas as area}
 							<div class="sp-area-item">
 								<span class="sp-cat-dot" style="background: {CATEGORY_COLORS[area.category]}"></span>
@@ -4044,7 +4164,7 @@
 								<span class="sp-area-cat">{area.category}</span>
 							</div>
 						{/each}
-						{#if editZone.areas.length === 0}
+						{#if editZone.areas.length === 0 && !addingArea}
 							<span class="sp-empty">No areas</span>
 						{/if}
 					</div>
@@ -4068,6 +4188,7 @@
 					Name
 					<input type="text" bind:value={dialogName} placeholder="Enter name..." />
 				</label>
+				{#if drawLevel !== 'zone'}
 				<label>
 					Category
 					<select bind:value={dialogCategory}>
@@ -4076,6 +4197,7 @@
 						{/each}
 					</select>
 				</label>
+				{/if}
 				{#if drawLevel === 'spot'}
 					<label>
 						Description
@@ -4218,6 +4340,7 @@
 		min-height: 0;
 		min-width: 0;
 		position: relative;
+		overflow: visible;
 	}
 
 	.map-area {
@@ -4263,7 +4386,7 @@
 		flex-shrink: 0;
 	}
 
-	.sp-header-spacer {
+	.sp-header-balance {
 		width: 30px;
 		flex-shrink: 0;
 	}
@@ -4330,6 +4453,24 @@
 		border-color: #818cf8;
 	}
 
+	.sp-select {
+		width: 100%;
+		padding: 8px 10px;
+		border: 1px solid #334155;
+		border-radius: 8px;
+		font-size: 14px;
+		font-family: 'Inter', sans-serif;
+		background: #0f172a;
+		color: #e2e8f0;
+		outline: none;
+		text-transform: capitalize;
+		cursor: pointer;
+	}
+
+	.sp-select:focus {
+		border-color: #818cf8;
+	}
+
 	.sp-cat-grid {
 		display: flex;
 		flex-wrap: wrap;
@@ -4365,8 +4506,8 @@
 	}
 
 	.sp-cat-dot {
-		width: 10px;
-		height: 10px;
+		width: 12px;
+		height: 12px;
 		border-radius: 50%;
 		flex-shrink: 0;
 	}
@@ -4408,21 +4549,21 @@
 	.sp-area-list {
 		display: flex;
 		flex-direction: column;
-		gap: 4px;
+		gap: 6px;
 	}
 
 	.sp-area-item {
 		display: flex;
 		align-items: center;
-		gap: 8px;
-		padding: 8px 10px;
+		gap: 10px;
+		padding: 12px 14px;
 		background: #0f172a;
 		border: 1px solid #334155;
-		border-radius: 6px;
+		border-radius: 8px;
 	}
 
 	.sp-area-name {
-		font-size: 13px;
+		font-size: 15px;
 		font-weight: 500;
 		color: #e2e8f0;
 		flex: 1;
@@ -4432,7 +4573,7 @@
 	}
 
 	.sp-area-cat {
-		font-size: 11px;
+		font-size: 13px;
 		color: #64748b;
 		text-transform: capitalize;
 	}
@@ -4450,7 +4591,7 @@
 
 	.sp-area-arrow {
 		color: #64748b;
-		font-size: 16px;
+		font-size: 18px;
 		font-weight: 600;
 	}
 
@@ -4773,7 +4914,9 @@
 	}
 
 	.zone-toolbar-bottom {
-		transform: translate(-50%, -100%);
+		bottom: 20px;
+		left: 50%;
+		transform: translateX(-50%);
 		flex-direction: row;
 		flex-wrap: wrap;
 		align-items: center;

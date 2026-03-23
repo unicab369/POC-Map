@@ -20,7 +20,6 @@ export interface ShapeStyle {
 export interface Zone {
 	id: string;
 	name: string;
-	category: POICategory;
 	shape: ShapeDef;
 	style: ShapeStyle;
 	areas: Area[];

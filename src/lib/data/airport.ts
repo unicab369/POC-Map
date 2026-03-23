@@ -13,7 +13,6 @@ export const airportVenue: Venue = {
 		{
 			id: 'arrivals',
 			name: 'Arrivals',
-			category: 'info',
 			zoneType: 'floor',
 			level: 0,
 			shape: { type: 'rect', x: 0, y: 0, width: 800, height: 350 },
@@ -88,7 +87,6 @@ export const airportVenue: Venue = {
 		{
 			id: 'departures',
 			name: 'Departures',
-			category: 'gate',
 			zoneType: 'floor',
 			level: 1,
 			shape: { type: 'rect', x: 0, y: 0, width: 800, height: 350 },
