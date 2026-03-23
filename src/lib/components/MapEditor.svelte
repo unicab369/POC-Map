@@ -4382,7 +4382,7 @@
 					/>
 					<button class="sp-label-place-btn" class:active={placingLabel}
 						onclick={() => { placingLabel = !placingLabel; }}
-						title="Place label on map"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><line x1="12" y1="2" x2="12" y2="6"/><line x1="12" y1="18" x2="12" y2="22"/><line x1="2" y1="12" x2="6" y2="12"/><line x1="18" y1="12" x2="22" y2="12"/></svg> Place Label</button>
+						title="Place label on map"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><line x1="12" y1="2" x2="12" y2="6"/><line x1="12" y1="18" x2="12" y2="22"/><line x1="2" y1="12" x2="6" y2="12"/><line x1="18" y1="12" x2="22" y2="12"/></svg> Place Label</button>
 					{#if placingLabel}
 						<span class="sp-label-hint">Click on map to place label</span>
 					{/if}
@@ -4480,7 +4480,7 @@
 					</div>
 					<button class="sp-label-place-btn" class:active={placingLabel}
 						onclick={() => { placingLabel = !placingLabel; }}
-						title="Place label on map"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><line x1="12" y1="2" x2="12" y2="6"/><line x1="12" y1="18" x2="12" y2="22"/><line x1="2" y1="12" x2="6" y2="12"/><line x1="18" y1="12" x2="22" y2="12"/></svg> Place Label</button>
+						title="Place label on map"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><line x1="12" y1="2" x2="12" y2="6"/><line x1="12" y1="18" x2="12" y2="22"/><line x1="2" y1="12" x2="6" y2="12"/><line x1="18" y1="12" x2="22" y2="12"/></svg> Place Label</button>
 					{#if placingLabel}
 						<span class="sp-label-hint">Click on map to place label</span>
 					{/if}
@@ -4599,18 +4599,16 @@
 			<div class="sp-section">
 				<span class="sp-section-label">{isSpotEdit ? 'Spot' : isAreaEdit ? 'Area' : 'Zone'} Name</span>
 				{#if !isSpotEdit}
-					<div class="sp-name-row">
-						<input
-							class="sp-input"
-							type="text"
-							bind:value={panelName}
-							onfocus={pushUndoSnapshot}
-							oninput={panelUpdateName}
-						/>
-						<button class="sp-label-place-btn" class:active={placingLabel}
-							onclick={() => { placingLabel = !placingLabel; }}
-							title="Place label on map"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><line x1="12" y1="2" x2="12" y2="6"/><line x1="12" y1="18" x2="12" y2="22"/><line x1="2" y1="12" x2="6" y2="12"/><line x1="18" y1="12" x2="22" y2="12"/></svg></button>
-					</div>
+					<input
+						class="sp-input"
+						type="text"
+						bind:value={panelName}
+						onfocus={pushUndoSnapshot}
+						oninput={panelUpdateName}
+					/>
+					<button class="sp-label-place-btn" class:active={placingLabel}
+						onclick={() => { placingLabel = !placingLabel; }}
+						title="Place label on map"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><line x1="12" y1="2" x2="12" y2="6"/><line x1="12" y1="18" x2="12" y2="22"/><line x1="2" y1="12" x2="6" y2="12"/><line x1="18" y1="12" x2="22" y2="12"/></svg> Place Label</button>
 					{#if placingLabel}
 						<span class="sp-label-hint">Click on map to place label</span>
 					{/if}
@@ -6259,21 +6257,24 @@
 	.sp-name-row { display: flex; gap: 6px; align-items: center; }
 	.sp-name-row .sp-input { flex: 1; }
 	.sp-label-place-btn {
-		width: 32px; height: 32px;
+		display: inline-flex; align-items: center; gap: 6px;
+		padding: 6px 10px;
 		background: #1e293b; border: 1px solid #334155;
 		border-radius: 6px; color: #94a3b8;
-		font-size: 16px; cursor: pointer;
-		display: flex; align-items: center; justify-content: center;
-		flex-shrink: 0;
+		font-size: 12px; font-family: 'Inter', sans-serif;
+		cursor: pointer; margin-top: 6px;
+		transition: all 0.12s;
 	}
+	.sp-label-place-btn svg { flex-shrink: 0; }
 	.sp-label-place-btn:hover { background: #334155; color: #e2e8f0; }
-	.sp-label-place-btn.active { background: #facc15; color: #000; border-color: #facc15; }
+	.sp-label-place-btn.active { background: #facc15; color: #0f172a; border-color: #facc15; }
 	.sp-label-hint {
 		font-size: 11px; color: #facc15; margin-top: 4px; display: block;
 	}
 	.sp-label-reset {
+		display: inline-flex; align-items: center; gap: 4px;
 		font-size: 11px; color: #94a3b8; background: none; border: none;
-		cursor: pointer; padding: 0; margin-top: 4px; text-decoration: underline;
+		cursor: pointer; padding: 0; margin-top: 4px;
 	}
 	.sp-label-reset:hover { color: #e2e8f0; }
 	.placing-label { cursor: crosshair !important; }
