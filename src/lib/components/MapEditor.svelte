@@ -49,6 +49,7 @@
 	let editingLayer: any = null;
 	let editingOriginalShape: ShapeDef | null = null;
 	let zoneClickedFlag = false;
+	let spotClickedFlag = false;
 
 	// Toolbar selection state (works for both zones and areas)
 	let editingTarget = $state<EditingTarget | null>(null);
@@ -78,6 +79,10 @@
 	let shapeDragHandlers: any = null;
 	let shapeRotateEdgeIdx: [number, number] | null = null;
 
+	// Remove confirm states
+	let removeAreaConfirming = $state(false);
+	let removeZoneConfirming = $state(false);
+
 	// Redraw shape state
 	let redrawActive = $state(false);
 	let redrawOriginalLayer: any = null;
@@ -85,9 +90,13 @@
 	let redrawVertexCount = $state(0); // track placed vertex count for undo button state
 	let redrawIsRedoing = false; // flag to prevent onRedrawVertexAdded from clearing redo stack
 	let redrawRestarting = false; // flag to prevent pm:drawend from cancelling during undo/redo restart
+	let redrawEntity: (Zone | Area | Spot) | null = null; // entity being redrawn in-place (when not editModeEntity)
 
 	// Shape toolbox popover state
 	let shapeToolboxPanel = $state<'fill' | 'stroke' | null>(null);
+
+	// Side panel color popup state
+	let spColorPopup = $state<'fill' | 'stroke' | null>(null);
 
 	// Label placement state
 	let placingLabel = $state(false);
@@ -105,6 +114,9 @@
 
 	// Sub-editing: when editing a zone, drill into an area without changing the canvas
 	let editPanelAreaId = $state<string>('');
+	let editPanelSpotId = $state<string>('');
+	let spotLayerMap = new Map<string, any>();
+	let removeSpotConfirming = $state(false);
 
 	// Relocate zone state
 	let relocatingZoneId = $state<string>('');
@@ -504,6 +516,52 @@
 		}
 	}
 
+	function removeAreaInEdit(zoneId: string, areaId: string) {
+		pushUndoSnapshot();
+		const zone = venue.zones.find(z => z.id === zoneId);
+		if (!zone) return;
+		const area = zone.areas.find(a => a.id === areaId);
+		if (!area) return;
+
+		// Move spots to an "Unassigned" area
+		if (area.spots.length > 0) {
+			let unassigned = zone.areas.find(a => a.name === 'Unassigned');
+			if (!unassigned) {
+				unassigned = {
+					id: generateId('area'),
+					name: 'Unassigned',
+					category: 'info' as POICategory,
+					shape: { type: 'polygon', points: [] },
+					style: defaultStyle('area', 'info'),
+					spots: []
+				};
+				zone.areas.push(unassigned);
+			}
+			unassigned.spots.push(...area.spots);
+		}
+
+		// Remove the area
+		zone.areas = zone.areas.filter(a => a.id !== areaId);
+		venue = { ...venue };
+		removeAreaConfirming = false;
+
+		// If we're in panelArea sub-view, just go back to zone panel
+		if (editModeTarget?.type === 'zone') {
+			clearPanelArea();
+			renderEditModeShapes();
+		} else {
+			// Direct area edit — navigate back to zone edit
+			switchToEditTarget({ type: 'zone', zoneId });
+		}
+	}
+
+	function removeZoneInEdit(zoneId: string) {
+		venue.zones = venue.zones.filter(z => z.id !== zoneId);
+		venue = { ...venue };
+		removeZoneConfirming = false;
+		exitEditMode(false);
+	}
+
 	const colorSwatches = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#10b981', '#3b82f6', '#8b5cf6', '#ec4899', '#6b7280', '#1e293b', '#ffffff', '#fbbf24', '#0ea5e9'];
 	const strokeSwatches = ['#cbd5e1', '#94a3b8', '#475569', '#1e293b', '#ffffff', '#000000'];
 
@@ -522,26 +580,26 @@
 		if (!zone) return null;
 		if (target.type === 'zone') {
 			return JSON.parse(JSON.stringify({
-				shape: zone.shape,
+				shape: zone.shape, style: zone.style, name: zone.name,
 				labelPosition: zone.labelPosition,
 				areas: zone.areas.map(a => ({
-					id: a.id, shape: a.shape, labelPosition: a.labelPosition,
-					spots: a.spots.map(s => ({ id: s.id, shape: s.shape }))
+					id: a.id, name: a.name, category: a.category, shape: a.shape, style: a.style, labelPosition: a.labelPosition,
+					spots: a.spots.map(s => ({ id: s.id, name: s.name, description: s.description, category: s.category, shape: s.shape, style: s.style }))
 				}))
 			}));
 		} else if (target.type === 'area') {
 			const area = zone.areas.find(a => a.id === target.areaId);
 			if (!area) return null;
 			return JSON.parse(JSON.stringify({
-				shape: area.shape,
+				name: area.name, category: area.category, shape: area.shape, style: area.style,
 				labelPosition: area.labelPosition,
-				spots: area.spots.map(s => ({ id: s.id, shape: s.shape }))
+				spots: area.spots.map(s => ({ id: s.id, name: s.name, description: s.description, category: s.category, shape: s.shape, style: s.style }))
 			}));
 		} else {
 			const area = zone.areas.find(a => a.id === target.areaId);
 			const spot = area?.spots.find(s => s.id === target.spotId);
 			if (!spot) return null;
-			return JSON.parse(JSON.stringify({ shape: spot.shape }));
+			return JSON.parse(JSON.stringify({ name: spot.name, description: spot.description, category: spot.category, shape: spot.shape, style: spot.style }));
 		}
 	}
 
@@ -1141,37 +1199,75 @@
 
 		if (editModeTarget.type === 'zone') {
 			zone.shape = snap.shape;
+			zone.style = snap.style ?? zone.style;
+			zone.name = snap.name ?? zone.name;
 			zone.labelPosition = snap.labelPosition;
-			for (const aSnap of snap.areas) {
-				const area = zone.areas.find((a: any) => a.id === aSnap.id);
-				if (area) {
-					area.shape = aSnap.shape;
-					area.labelPosition = aSnap.labelPosition;
-					for (const sSnap of aSnap.spots) {
-						const spot = area.spots.find((s: any) => s.id === sSnap.id);
-						if (spot) spot.shape = sSnap.shape;
-					}
-				}
+			// Restore full area+spot list from snapshot (handles add/remove)
+			if (snap.areas) {
+				zone.areas = snap.areas.map((aSnap: any) => {
+					const existing = zone.areas.find((a: any) => a.id === aSnap.id);
+					return {
+						...(existing || {}),
+						id: aSnap.id, name: aSnap.name, category: aSnap.category,
+						shape: aSnap.shape, style: aSnap.style, labelPosition: aSnap.labelPosition,
+						spots: (aSnap.spots || []).map((sSnap: any) => {
+							const existingSpot = existing?.spots.find((s: any) => s.id === sSnap.id);
+							return {
+								...(existingSpot || {}),
+								id: sSnap.id, name: sSnap.name, description: sSnap.description,
+								category: sSnap.category, shape: sSnap.shape, style: sSnap.style
+							};
+						})
+					};
+				});
 			}
 		} else if (editModeTarget.type === 'area') {
 			const area = zone.areas.find((a: any) => a.id === (editModeTarget as any).areaId);
 			if (area) {
 				area.shape = snap.shape;
+				area.style = snap.style ?? area.style;
+				area.name = snap.name ?? area.name;
+				area.category = snap.category ?? area.category;
 				area.labelPosition = snap.labelPosition;
-				for (const sSnap of snap.spots) {
-					const spot = area.spots.find((s: any) => s.id === sSnap.id);
-					if (spot) spot.shape = sSnap.shape;
+				// Restore full spot list from snapshot (handles add/remove)
+				if (snap.spots) {
+					area.spots = snap.spots.map((sSnap: any) => {
+						const existing = area.spots.find((s: any) => s.id === sSnap.id);
+						return {
+							...(existing || {}),
+							id: sSnap.id, name: sSnap.name, description: sSnap.description,
+							category: sSnap.category, shape: sSnap.shape, style: sSnap.style
+						};
+					});
 				}
 			}
 		} else {
 			const area = zone.areas.find((a: any) => a.id === (editModeTarget as any).areaId);
 			const spot = area?.spots.find((s: any) => s.id === (editModeTarget as any).spotId);
-			if (spot) spot.shape = snap.shape;
+			if (spot) {
+				spot.shape = snap.shape;
+				spot.style = snap.style ?? spot.style;
+				spot.name = snap.name ?? spot.name;
+				spot.description = snap.description ?? spot.description;
+				spot.category = snap.category ?? spot.category;
+			}
 		}
 
 		venue = { ...venue };
 		deselectEditModeItem();
 		renderEditModeShapes();
+
+		// Sync panel state vars with restored entity
+		const entity = getEditModeEntity();
+		if (entity) {
+			panelName = entity.name;
+			panelFill = entity.style.fill;
+			panelOpacity = entity.style.opacity ?? 0.85;
+			panelStroke = entity.style.stroke ?? '#cbd5e1';
+			panelStrokeWidth = entity.style.strokeWidth ?? 1;
+			if ('category' in entity) panelCategory = (entity as any).category;
+			if ('description' in entity) panelDescription = (entity as any).description ?? '';
+		}
 
 		// Restore overlay state if present in snapshot
 		if (snap.overlay) {
@@ -1483,6 +1579,7 @@
 		shapeLayers = [];
 		editModeLayer = null;
 		areaLayerMap = new Map();
+		spotLayerMap = new Map();
 
 		if (editModeTarget.type === 'zone') {
 			// Editing a zone: show zone + all its areas + spots
@@ -1496,6 +1593,7 @@
 					zoneClickedFlag = true;
 					setTimeout(() => zoneClickedFlag = false, 0);
 					if (editingTarget) deselectEntity(); // deselect any selected area/spot
+					if (editPanelSpotId) clearPanelSpot();
 					if (editPanelAreaId) clearPanelArea(); // back to Edit Zone
 					selectEditModeItem('shape');
 				});
@@ -1509,10 +1607,13 @@
 					areaLayerMap.set(area.id, areaLayer);
 
 					const handleAreaClick = () => {
+						if (addSpotDrawing || addAreaDrawing || redrawActive) return;
+						if (spotClickedFlag) return; // spot takes priority
 						zoneClickedFlag = true;
 						setTimeout(() => zoneClickedFlag = false, 0);
 						deselectEditModeItem(); // deselect zone shape toolbox
 						if (editingTarget) deselectEntity();
+						if (editPanelSpotId) clearPanelSpot();
 						// Show Edit Area in sidebar without changing the canvas
 						selectPanelArea(area.id);
 					};
@@ -1529,6 +1630,7 @@
 						areaEl.style.cursor = 'grab';
 						areaEl.addEventListener('pointerdown', (pe: PointerEvent) => {
 							if (pe.button !== 0) return;
+							if (addSpotDrawing || addAreaDrawing || redrawActive) return;
 							pe.stopImmediatePropagation();
 							zoneClickedFlag = true;
 							map.dragging.disable();
@@ -1620,16 +1722,17 @@
 						spotLayer.addTo(map);
 						shapeLayers.push(spotLayer);
 						areaChildLayers.push(spotLayer);
+						spotLayerMap.set(spot.id, spotLayer);
 
 						spotLayer.on('click', (e: any) => {
 							if (e.originalEvent) e.originalEvent.stopPropagation();
+							spotClickedFlag = true;
 							zoneClickedFlag = true;
-							setTimeout(() => zoneClickedFlag = false, 0);
-							if (editingTarget?.type === 'spot' && (editingTarget as any).spotId === spot.id) {
-								deselectEntity();
-							} else {
-								selectEntityForToolbar({ type: 'spot', zoneId: zone.id, areaId: area.id, spotId: spot.id }, spotLayer);
-							}
+							setTimeout(() => { spotClickedFlag = false; zoneClickedFlag = false; }, 0);
+							if (editingTarget) deselectEntity();
+							deselectEditModeItem();
+							if (editPanelAreaId) unhighlightPanelArea();
+							selectPanelSpot(spot.id, area.id);
 						});
 					}
 				}
@@ -1647,6 +1750,7 @@
 				areaLayer.on('click', () => {
 					zoneClickedFlag = true;
 					setTimeout(() => zoneClickedFlag = false, 0);
+					if (editPanelSpotId) clearPanelSpot();
 					selectEditModeItem('shape');
 				});
 			}
@@ -1655,13 +1759,14 @@
 				if (spotLayer) {
 					spotLayer.addTo(map);
 					shapeLayers.push(spotLayer);
-					// Make spot clickable to enter spot edit mode
+					spotLayerMap.set(spot.id, spotLayer);
 					const el = spotLayer.getElement?.();
 					if (el) el.style.cursor = 'pointer';
 					spotLayer.on('click', () => {
 						zoneClickedFlag = true;
 						setTimeout(() => zoneClickedFlag = false, 0);
-						switchToEditTarget({ type: 'spot', zoneId: editModeTarget!.zoneId, areaId: (editModeTarget as any).areaId, spotId: spot.id });
+						deselectEditModeItem();
+						selectPanelSpot(spot.id, area.id);
 					});
 				}
 			}
@@ -1688,8 +1793,14 @@
 			}
 		}
 
-		// Re-apply highlight on the selected panel area after re-render
-		if (editPanelAreaId) {
+		// Re-apply highlight on the selected panel area/spot after re-render
+		// Only highlight one thing at a time: spot takes priority over area
+		if (editPanelSpotId) {
+			const layer = spotLayerMap.get(editPanelSpotId);
+			if (layer) {
+				layer.setStyle({ weight: 3, dashArray: '6 4', color: '#facc15' });
+			}
+		} else if (editPanelAreaId) {
 			const layer = areaLayerMap.get(editPanelAreaId);
 			if (layer) {
 				layer.setStyle({ weight: 3, dashArray: '6 4', color: '#facc15' });
@@ -1895,6 +2006,8 @@
 		editModeOriginalShapes = null;
 		editModeOriginalEntity = null;
 		editPanelAreaId = '';
+		editPanelSpotId = '';
+		removeZoneConfirming = false;
 		oneditchange(null);
 
 		// Re-add tile layer and floor background
@@ -1923,12 +2036,16 @@
 	}
 
 	function switchToEditTarget(target: EditingTarget) {
+		removeAreaConfirming = false;
+		removeSpotConfirming = false;
+		editPanelSpotId = '';
 		exitEditMode(true);
 		enterEditModeForTarget(target);
 	}
 
 	/** Show area details in sidebar without changing the canvas (zone stays rendered) */
 	function selectPanelArea(areaId: string) {
+		spColorPopup = null;
 		// Unhighlight previous
 		if (editPanelAreaId && editPanelAreaId !== areaId) {
 			unhighlightPanelArea();
@@ -1942,6 +2059,8 @@
 	}
 
 	function clearPanelArea() {
+		removeAreaConfirming = false;
+		if (editPanelSpotId) clearPanelSpot();
 		unhighlightPanelArea();
 		editPanelAreaId = '';
 	}
@@ -1958,6 +2077,61 @@
 				dashArray: ''
 			});
 		}
+	}
+
+	function selectPanelSpot(spotId: string, parentAreaId: string) {
+		spColorPopup = null;
+		if (editPanelSpotId && editPanelSpotId !== spotId) {
+			unhighlightPanelSpot();
+		}
+		// If coming from zone edit and no area selected yet, select the area too
+		if (editModeTarget?.type === 'zone' && !editPanelAreaId) {
+			editPanelAreaId = parentAreaId;
+		}
+		editPanelSpotId = spotId;
+		removeSpotConfirming = false;
+		const layer = spotLayerMap.get(spotId);
+		if (layer) {
+			layer.setStyle({ weight: 3, dashArray: '6 4', color: '#facc15' });
+		}
+	}
+
+	function clearPanelSpot() {
+		spColorPopup = null;
+		removeSpotConfirming = false;
+		unhighlightPanelSpot();
+		editPanelSpotId = '';
+	}
+
+	function unhighlightPanelSpot() {
+		if (!editPanelSpotId) return;
+		const layer = spotLayerMap.get(editPanelSpotId);
+		const zone = venue.zones.find(z => z.id === editModeTarget?.zoneId);
+		let spot: any;
+		for (const a of zone?.areas ?? []) {
+			spot = a.spots.find(s => s.id === editPanelSpotId);
+			if (spot) break;
+		}
+		if (layer && spot) {
+			layer.setStyle({
+				color: spot.style.stroke ?? '#cbd5e1',
+				weight: spot.style.strokeWidth ?? 1,
+				dashArray: ''
+			});
+		}
+	}
+
+	function removeSpotInEdit(zoneId: string, areaId: string, spotId: string) {
+		pushUndoSnapshot();
+		const zone = venue.zones.find(z => z.id === zoneId);
+		if (!zone) return;
+		const area = zone.areas.find(a => a.id === areaId);
+		if (!area) return;
+		area.spots = area.spots.filter(s => s.id !== spotId);
+		venue = { ...venue };
+		removeSpotConfirming = false;
+		clearPanelSpot();
+		renderEditModeShapes();
 	}
 
 	// Side panel handlers (work for both zone and area editing)
@@ -1979,6 +2153,7 @@
 	}
 
 	function panelUpdateCategory(cat: POICategory) {
+		pushUndoSnapshot();
 		const entity = getEditModeEntity();
 		if (entity) {
 			const level = editModeTarget?.type ?? 'zone';
@@ -2144,20 +2319,23 @@
 		restartRedrawWith(vertices);
 	}
 
-	function startRedraw() {
-		if (!editModeLayer || !map) return;
-		const entity = getEditModeEntity();
-		if (!entity) return;
+	function startRedraw(targetLayer?: any, targetEntity?: Zone | Area | Spot) {
+		const layer = targetLayer ?? editModeLayer;
+		const entity = targetEntity ?? getEditModeEntity();
+		if (!layer || !map || !entity) return;
 
 		// Deselect current edit-mode selection (disables pm / removes overlay handles)
 		deselectEditModeItem();
 
+		// Track in-place entity if different from editModeEntity
+		redrawEntity = targetEntity ?? null;
+
 		// Remove the current layer from the map entirely (prevents click-selection)
-		if (editModeLayer.getTooltip()) editModeLayer.closeTooltip();
-		map.removeLayer(editModeLayer);
+		if (layer.getTooltip()) layer.closeTooltip();
+		map.removeLayer(layer);
 
 		// Stash reference
-		redrawOriginalLayer = editModeLayer;
+		redrawOriginalLayer = layer;
 
 		// Hide Geoman controls
 		map.pm.removeControls();
@@ -2183,6 +2361,8 @@
 	function cancelRedraw() {
 		if (!map) return;
 
+		const inPlace = !!redrawEntity;
+
 		// Stop drawing
 		map.pm.disableDraw();
 		map.off('pm:vertexadded', onRedrawVertexAdded);
@@ -2190,7 +2370,7 @@
 		// Re-add original layer to the map
 		if (redrawOriginalLayer) {
 			redrawOriginalLayer.addTo(map);
-			const entity = getEditModeEntity();
+			const entity = redrawEntity ?? getEditModeEntity();
 			if (entity) {
 				redrawOriginalLayer.setStyle({
 					fillColor: entity.style.fill,
@@ -2204,15 +2384,29 @@
 
 		redrawActive = false;
 		redrawOriginalLayer = null;
+		redrawEntity = null;
 
-		// Re-select shape so vertex editing is restored
-		editModeSelection = null;
-		selectEditModeItem('shape');
+		if (inPlace) {
+			// Re-highlight the panel spot/area
+			if (editPanelSpotId) {
+				const layer = spotLayerMap.get(editPanelSpotId);
+				if (layer) layer.setStyle({ weight: 3, dashArray: '6 4', color: '#facc15' });
+			} else if (editPanelAreaId) {
+				const layer = areaLayerMap.get(editPanelAreaId);
+				if (layer) layer.setStyle({ weight: 3, dashArray: '6 4', color: '#facc15' });
+			}
+		} else {
+			// Re-select shape so vertex editing is restored
+			editModeSelection = null;
+			selectEditModeItem('shape');
+		}
 	}
 
 	function completeRedraw(newLayer: any) {
 		if (!map || !editModeTarget) return;
 		map.off('pm:vertexadded', onRedrawVertexAdded);
+
+		const inPlace = !!redrawEntity;
 
 		// Extract shape from the newly drawn layer
 		let newShape = layerToShapeDef(newLayer);
@@ -2220,7 +2414,7 @@
 		if (converter) newShape = converter.shapeToPixel(newShape);
 
 		// Update entity shape in data model
-		const entity = getEditModeEntity();
+		const entity = redrawEntity ?? getEditModeEntity();
 		if (entity) {
 			entity.shape = newShape;
 			venue = { ...venue };
@@ -2237,16 +2431,19 @@
 
 		redrawActive = false;
 		redrawOriginalLayer = null;
+		redrawEntity = null;
 
 		// Rebuild with new shape (re-enables vertex editing)
 		renderEditModeShapes();
 
-		// Fit bounds to new shape
-		setTimeout(() => {
-			if (editModeLayer) {
-				map.fitBounds(editModeLayer.getBounds().pad(0.2));
-			}
-		}, 50);
+		if (!inPlace) {
+			// Fit bounds to new shape
+			setTimeout(() => {
+				if (editModeLayer) {
+					map.fitBounds(editModeLayer.getBounds().pad(0.2));
+				}
+			}, 50);
+		}
 	}
 
 	function handleOverlayFile(e: Event) {
@@ -3259,6 +3456,7 @@
 
 		zoneLayerMap = new Map();
 		areaLayerMap = new Map();
+		spotLayerMap = new Map();
 
 		// Filter zones based on activeZoneId
 		const zonesToRender = activeZoneId
@@ -3552,6 +3750,7 @@
 				if (redrawActive || addSpotDrawing || addAreaDrawing) return; // don't select anything during draw
 				// Deselect area/spot toolbar if active
 				if (editingTarget) deselectEntity();
+				if (editPanelSpotId) clearPanelSpot();
 				if (editPanelAreaId) clearPanelArea(); // back to Edit Zone
 				// If click is within overlay bounds, select overlay
 				if (overlayLayer && overlayLayer.getBounds().contains(e.latlng) && editModeSelection !== 'overlay') {
@@ -3928,88 +4127,6 @@
 			{/if}
 		{/if}
 
-		{#if editMode && editModeSelection === 'shape'}
-			<!-- svelte-ignore a11y_no_static_element_interactions -->
-			<!-- svelte-ignore a11y_click_events_have_key_events -->
-			<div class="shape-toolbox" onmousedown={(e) => e.stopPropagation()} onclick={(e) => e.stopPropagation()}>
-				<div class="stb-item">
-					<button
-						class="stb-swatch"
-						style="background: {panelFill}; opacity: {panelOpacity};"
-						title="Fill color"
-						onclick={() => { shapeToolboxPanel = shapeToolboxPanel === 'fill' ? null : 'fill'; }}
-					></button>
-					{#if shapeToolboxPanel === 'fill'}
-						<div class="stb-popover">
-							<span class="stb-popover-title">Fill Color</span>
-							<div class="stb-popover-grid">
-								{#each colorSwatches as c}
-									<button
-										class="zt-swatch"
-										class:active={panelFill === c}
-										style="background: {c}"
-										title={c}
-										onclick={() => { panelFill = c; panelApplyStyle(); }}
-									></button>
-								{/each}
-								<input type="color" class="zt-color-input" bind:value={panelFill} oninput={panelApplyStyle} />
-							</div>
-							<div class="stb-opacity-row">
-								<span class="stb-label">Opacity</span>
-								<input type="range" class="zt-range stb-range" min="0.1" max="1" step="0.05" bind:value={panelOpacity} oninput={panelApplyStyle} />
-								<span class="zt-range-val">{panelOpacity.toFixed(2)}</span>
-							</div>
-						</div>
-					{/if}
-				</div>
-
-				<div class="stb-item">
-					<button
-						class="stb-swatch stb-stroke-swatch"
-						style="border-color: {panelStroke};"
-						title="Stroke color"
-						onclick={() => { shapeToolboxPanel = shapeToolboxPanel === 'stroke' ? null : 'stroke'; }}
-					></button>
-					{#if shapeToolboxPanel === 'stroke'}
-						<div class="stb-popover">
-							<span class="stb-popover-title">Stroke Color</span>
-							<div class="stb-popover-grid">
-								{#each strokeSwatches as c}
-									<button
-										class="zt-swatch"
-										class:active={panelStroke === c}
-										style="background: {c}"
-										title={c}
-										onclick={() => { panelStroke = c; panelApplyStyle(); }}
-									></button>
-								{/each}
-								<input type="color" class="zt-color-input" bind:value={panelStroke} oninput={panelApplyStyle} />
-							</div>
-							<div class="stb-opacity-row">
-								<span class="stb-label">Width</span>
-								<input type="range" class="zt-range stb-range" min="0" max="5" step="0.5" bind:value={panelStrokeWidth} oninput={panelApplyStyle} />
-								<span class="zt-range-val">{panelStrokeWidth}</span>
-							</div>
-						</div>
-					{/if}
-				</div>
-
-				{#if redrawActive}
-					<button class="stb-btn" title="Cancel redraw" onclick={cancelRedraw}>
-						<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-							<line x1="18" y1="6" x2="6" y2="18"></line>
-							<line x1="6" y1="6" x2="18" y2="18"></line>
-						</svg>
-					</button>
-				{:else}
-					<button class="stb-btn" title="Redraw shape" onclick={startRedraw}>
-						<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-							<polygon points="16 3 21 8 8 21 3 21 3 16 16 3"></polygon>
-						</svg>
-					</button>
-				{/if}
-			</div>
-		{/if}
 
 	</div>
 
@@ -4019,20 +4136,28 @@
 		{@const isSpotEdit = editModeTarget.type === 'spot'}
 		{@const editZone = venue.zones.find(z => z.id === editModeTarget.zoneId)}
 		{@const panelArea = (editModeTarget.type === 'zone' && editPanelAreaId) ? editZone?.areas.find(a => a.id === editPanelAreaId) : null}
+		{@const panelSpotAreaId = isAreaEdit ? (editModeTarget as any).areaId : editPanelAreaId}
+		{@const panelSpotArea = editZone?.areas.find(a => a.id === panelSpotAreaId)}
+		{@const panelSpot = editPanelSpotId ? panelSpotArea?.spots.find(s => s.id === editPanelSpotId) ?? null : null}
 		{@const showingArea = isAreaEdit || !!panelArea}
+		{@const showingSpot = !!panelSpot}
 		{#if editEntity}
 		<!-- svelte-ignore a11y_no_static_element_interactions -->
 		<!-- svelte-ignore a11y_click_events_have_key_events -->
 		<div class="side-panel" class:redraw-active={redrawActive} onclick={(e) => e.stopPropagation()}>
 			<div class="sp-header">
 				<div class="sp-header-balance"></div>
-				<span class="sp-title">Edit {isSpotEdit ? 'Spot' : showingArea ? 'Area' : 'Zone'}</span>
+				<span class="sp-title">Edit {showingSpot || isSpotEdit ? 'Spot' : showingArea ? 'Area' : 'Zone'}</span>
 				<button class="sp-close" onclick={discardEditMode} title="Discard changes">&#x2715;</button>
 			</div>
 
 			<div class="sp-body">
 
-			{#if isSpotEdit}
+			{#if panelSpot}
+				<button class="sp-back-btn" onclick={clearPanelSpot}>
+					&#x2190; Back to {isAreaEdit ? 'Area' : panelArea ? 'Area' : 'Zone'}
+				</button>
+			{:else if isSpotEdit}
 				<button class="sp-back-btn" onclick={() => switchToEditTarget({ type: 'area', zoneId: editModeTarget.zoneId, areaId: (editModeTarget as any).areaId })}>
 					&#x2190; Back to Area
 				</button>
@@ -4046,7 +4171,91 @@
 				</button>
 			{/if}
 
-			{#if panelArea}
+			{#if panelSpot}
+				<!-- Spot sub-panel -->
+				<div class="sp-section">
+					<span class="sp-section-label">Spot Name</span>
+					<input
+						class="sp-input"
+						type="text"
+						value={panelSpot.name}
+						onfocus={pushUndoSnapshot}
+						oninput={(e) => { panelSpot.name = e.currentTarget.value.trim() || panelSpot.name; venue = { ...venue }; renderEditModeShapes(); }}
+					/>
+				</div>
+
+				<div class="sp-section">
+					<span class="sp-section-label">Description</span>
+					<textarea
+						class="sp-input sp-textarea"
+						value={panelSpot.description}
+						onfocus={pushUndoSnapshot}
+						oninput={(e) => { panelSpot.description = e.currentTarget.value; venue = { ...venue }; }}
+						rows="2"
+						placeholder="Enter description..."
+					></textarea>
+				</div>
+
+				<div class="sp-section">
+					<span class="sp-section-label">Category</span>
+					<select class="sp-select" value={panelSpot.category} onchange={(e) => { pushUndoSnapshot(); panelSpot.category = e.currentTarget.value as POICategory; panelSpot.style = defaultStyle('spot', panelSpot.category); venue = { ...venue }; renderEditModeShapes(); }}>
+						{#each categories as cat}
+							<option value={cat}>{cat}</option>
+						{/each}
+					</select>
+				</div>
+
+				<div class="sp-section sp-color-row-section">
+					<div class="sp-color-item">
+						<span class="sp-section-label">Fill</span>
+						<button class="sp-color-btn" style="background: {panelSpot.style.fill}; opacity: {panelSpot.style.opacity ?? 0.8}" onclick={() => { if (spColorPopup !== 'fill') pushUndoSnapshot(); spColorPopup = spColorPopup === 'fill' ? null : 'fill'; }}></button>
+						{#if spColorPopup === 'fill'}
+							<div class="sp-color-popup">
+								<div class="sp-color-popup-grid">
+									{#each colorSwatches as c}
+										<button class="zt-swatch" class:active={panelSpot.style.fill === c} style="background: {c}" onclick={() => { panelSpot.style.fill = c; venue = { ...venue }; renderEditModeShapes(); }}></button>
+									{/each}
+									<input type="color" class="zt-color-input" value={panelSpot.style.fill} oninput={(e) => { panelSpot.style.fill = e.currentTarget.value; venue = { ...venue }; renderEditModeShapes(); }} />
+								</div>
+								<div class="sp-color-popup-slider">
+									<span class="sp-color-popup-label">Opacity</span>
+									<input type="range" class="zt-range" min="0.1" max="1" step="0.05" value={panelSpot.style.opacity ?? 0.8} oninput={(e) => { panelSpot.style.opacity = parseFloat(e.currentTarget.value); venue = { ...venue }; renderEditModeShapes(); }} />
+									<span class="zt-range-val">{(panelSpot.style.opacity ?? 0.8).toFixed(2)}</span>
+								</div>
+							</div>
+						{/if}
+					</div>
+					<div class="sp-color-item">
+						<span class="sp-section-label">Stroke</span>
+						<button class="sp-color-btn sp-color-btn-stroke" style="border-color: {panelSpot.style.stroke ?? '#cbd5e1'}" onclick={() => { if (spColorPopup !== 'stroke') pushUndoSnapshot(); spColorPopup = spColorPopup === 'stroke' ? null : 'stroke'; }}></button>
+						{#if spColorPopup === 'stroke'}
+							<div class="sp-color-popup">
+								<div class="sp-color-popup-grid">
+									{#each strokeSwatches as c}
+										<button class="zt-swatch" class:active={(panelSpot.style.stroke ?? '#cbd5e1') === c} style="background: {c}" onclick={() => { panelSpot.style.stroke = c; venue = { ...venue }; renderEditModeShapes(); }}></button>
+									{/each}
+									<input type="color" class="zt-color-input" value={panelSpot.style.stroke ?? '#cbd5e1'} oninput={(e) => { panelSpot.style.stroke = e.currentTarget.value; venue = { ...venue }; renderEditModeShapes(); }} />
+								</div>
+							</div>
+						{/if}
+					</div>
+				</div>
+
+				<div class="sp-section sp-area-actions">
+					{#if removeSpotConfirming}
+						<span class="sp-confirm-text">Remove "{panelSpot.name}"?</span>
+						<div class="sp-confirm-actions">
+							<button class="zt-btn zt-btn-danger" onclick={() => removeSpotInEdit(editModeTarget.zoneId, panelSpotAreaId, panelSpot.id)}>Remove</button>
+							<button class="zt-btn" onclick={() => removeSpotConfirming = false}>Cancel</button>
+						</div>
+					{:else}
+						<div class="sp-area-action-row">
+							<button class="zt-btn zt-btn-danger sp-area-action-btn" onclick={() => removeSpotConfirming = true}>Remove Spot</button>
+							<button class="zt-btn sp-btn-reset sp-area-action-btn" onclick={() => { const layer = spotLayerMap.get(panelSpot.id); if (layer) startRedraw(layer, panelSpot); }}>Redraw Shape</button>
+						</div>
+					{/if}
+				</div>
+			{:else if panelArea}
 				<!-- Area sub-panel (zone canvas stays) -->
 				<div class="sp-section">
 					<span class="sp-section-label">Area Name</span>
@@ -4055,6 +4264,7 @@
 							class="sp-input"
 							type="text"
 							value={panelArea.name}
+							onfocus={pushUndoSnapshot}
 							oninput={(e) => { panelArea.name = e.currentTarget.value.trim() || panelArea.name; venue = { ...venue }; renderEditModeShapes(); }}
 						/>
 					</div>
@@ -4062,60 +4272,74 @@
 
 				<div class="sp-section">
 					<span class="sp-section-label">Category</span>
-					<select class="sp-select" value={panelArea.category} onchange={(e) => { panelArea.category = e.currentTarget.value as POICategory; panelArea.style = defaultStyle('area', panelArea.category); venue = { ...venue }; renderEditModeShapes(); }}>
+					<select class="sp-select" value={panelArea.category} onchange={(e) => { pushUndoSnapshot(); panelArea.category = e.currentTarget.value as POICategory; panelArea.style = defaultStyle('area', panelArea.category); venue = { ...venue }; renderEditModeShapes(); }}>
 						{#each categories as cat}
 							<option value={cat}>{cat}</option>
 						{/each}
 					</select>
 				</div>
 
-				<div class="sp-section sp-section-area-style">
-					<span class="sp-section-label">Fill</span>
-					<div class="sp-swatches">
-						{#each colorSwatches as c}
-							<button
-								class="zt-swatch"
-								class:active={panelArea.style.fill === c}
-								style="background: {c}"
-								title={c}
-								onclick={() => { panelArea.style.fill = c; venue = { ...venue }; renderEditModeShapes(); }}
-							></button>
-						{/each}
-						<input type="color" class="zt-color-input" value={panelArea.style.fill} oninput={(e) => { panelArea.style.fill = e.currentTarget.value; venue = { ...venue }; renderEditModeShapes(); }} />
+				<div class="sp-section sp-color-row-section">
+					<div class="sp-color-item">
+						<span class="sp-section-label">Fill</span>
+						<button class="sp-color-btn" style="background: {panelArea.style.fill}; opacity: {panelArea.style.opacity ?? 0.85}" onclick={() => { if (spColorPopup !== 'fill') pushUndoSnapshot(); spColorPopup = spColorPopup === 'fill' ? null : 'fill'; }}></button>
+						{#if spColorPopup === 'fill'}
+							<div class="sp-color-popup">
+								<div class="sp-color-popup-grid">
+									{#each colorSwatches as c}
+										<button class="zt-swatch" class:active={panelArea.style.fill === c} style="background: {c}" onclick={() => { panelArea.style.fill = c; venue = { ...venue }; renderEditModeShapes(); }}></button>
+									{/each}
+									<input type="color" class="zt-color-input" value={panelArea.style.fill} oninput={(e) => { panelArea.style.fill = e.currentTarget.value; venue = { ...venue }; renderEditModeShapes(); }} />
+								</div>
+								<div class="sp-color-popup-slider">
+									<span class="sp-color-popup-label">Opacity</span>
+									<input type="range" class="zt-range" min="0.1" max="1" step="0.05" value={panelArea.style.opacity ?? 0.85} oninput={(e) => { panelArea.style.opacity = parseFloat(e.currentTarget.value); venue = { ...venue }; renderEditModeShapes(); }} />
+									<span class="zt-range-val">{(panelArea.style.opacity ?? 0.85).toFixed(2)}</span>
+								</div>
+							</div>
+						{/if}
 					</div>
-					<div class="sp-style-row">
-						<span class="sp-style-label">Opacity</span>
-						<input type="range" class="zt-range sp-range-full" min="0.1" max="1" step="0.05" value={panelArea.style.opacity ?? 0.85} oninput={(e) => { panelArea.style.opacity = parseFloat(e.currentTarget.value); venue = { ...venue }; renderEditModeShapes(); }} />
-						<span class="zt-range-val">{(panelArea.style.opacity ?? 0.85).toFixed(2)}</span>
+					<div class="sp-color-item">
+						<span class="sp-section-label">Stroke</span>
+						<button class="sp-color-btn sp-color-btn-stroke" style="border-color: {panelArea.style.stroke ?? '#cbd5e1'}" onclick={() => { if (spColorPopup !== 'stroke') pushUndoSnapshot(); spColorPopup = spColorPopup === 'stroke' ? null : 'stroke'; }}></button>
+						{#if spColorPopup === 'stroke'}
+							<div class="sp-color-popup">
+								<div class="sp-color-popup-grid">
+									{#each strokeSwatches as c}
+										<button class="zt-swatch" class:active={(panelArea.style.stroke ?? '#cbd5e1') === c} style="background: {c}" onclick={() => { panelArea.style.stroke = c; venue = { ...venue }; renderEditModeShapes(); }}></button>
+									{/each}
+									<input type="color" class="zt-color-input" value={panelArea.style.stroke ?? '#cbd5e1'} oninput={(e) => { panelArea.style.stroke = e.currentTarget.value; venue = { ...venue }; renderEditModeShapes(); }} />
+								</div>
+							</div>
+						{/if}
 					</div>
-					<div class="sp-style-row">
-						<span class="sp-style-label">Stroke</span>
-						<div class="sp-swatches">
-							{#each strokeSwatches as c}
-								<button
-									class="zt-swatch"
-									class:active={(panelArea.style.stroke ?? '#cbd5e1') === c}
-									style="background: {c}"
-									title={c}
-									onclick={() => { panelArea.style.stroke = c; venue = { ...venue }; renderEditModeShapes(); }}
-								></button>
-							{/each}
-							<input type="color" class="zt-color-input" value={panelArea.style.stroke ?? '#cbd5e1'} oninput={(e) => { panelArea.style.stroke = e.currentTarget.value; venue = { ...venue }; renderEditModeShapes(); }} />
+				</div>
+
+				<div class="sp-section sp-area-actions">
+					{#if removeAreaConfirming}
+						<span class="sp-confirm-text">Remove "{panelArea.name}"?{panelArea.spots.length > 0 ? ` ${panelArea.spots.length} spot(s) will be moved to Unassigned.` : ''}</span>
+						<div class="sp-confirm-actions">
+							<button class="zt-btn zt-btn-danger" onclick={() => removeAreaInEdit(editModeTarget.zoneId, panelArea.id)}>Remove</button>
+							<button class="zt-btn" onclick={() => removeAreaConfirming = false}>Cancel</button>
 						</div>
-					</div>
+					{:else}
+						<button class="zt-btn sp-btn-reset sp-area-action-btn" onclick={() => { const layer = areaLayerMap.get(panelArea.id); if (layer) startRedraw(layer, panelArea); }}>Redraw Shape</button>
+						<button class="zt-btn zt-btn-danger sp-area-action-btn" onclick={() => removeAreaConfirming = true}>Remove Area</button>
+					{/if}
 				</div>
 
 				<div class="sp-section">
 					<span class="sp-section-label">Spots ({panelArea.spots.length})</span>
 					<div class="sp-spot-list">
 						{#each panelArea.spots as spot}
-							<div class="sp-spot-card">
+							<button class="sp-spot-card" onclick={() => selectPanelSpot(spot.id, panelArea.id)}>
 								<span class="sp-spot-dot" style="background: {CATEGORY_COLORS[spot.category]}"></span>
 								<div class="sp-spot-info">
 									<span class="sp-spot-name">{spot.name}</span>
 									<span class="sp-spot-cat">{spot.category}</span>
 								</div>
-							</div>
+								<span class="sp-area-arrow">&#x203A;</span>
+							</button>
 						{/each}
 						{#if panelArea.spots.length === 0}
 							<span class="sp-empty">No spots</span>
@@ -4131,6 +4355,7 @@
 							class="sp-input"
 							type="text"
 							bind:value={panelName}
+							onfocus={pushUndoSnapshot}
 							oninput={panelUpdateName}
 						/>
 						<button class="sp-label-place-btn" class:active={placingLabel}
@@ -4153,6 +4378,7 @@
 						class="sp-input"
 						type="text"
 						bind:value={panelName}
+						onfocus={pushUndoSnapshot}
 						oninput={panelUpdateName}
 					/>
 				{/if}
@@ -4164,6 +4390,7 @@
 					<textarea
 						class="sp-input sp-textarea"
 						bind:value={panelDescription}
+						onfocus={pushUndoSnapshot}
 						oninput={panelUpdateDescription}
 						rows="2"
 						placeholder="Enter description..."
@@ -4182,6 +4409,77 @@
 			</div>
 			{/if}
 
+			<div class="sp-section sp-color-row-section">
+				<div class="sp-color-item">
+					<span class="sp-section-label">Fill</span>
+					<button class="sp-color-btn" style="background: {panelFill}; opacity: {panelOpacity}" onclick={() => { if (spColorPopup !== 'fill') pushUndoSnapshot(); spColorPopup = spColorPopup === 'fill' ? null : 'fill'; }}></button>
+					{#if spColorPopup === 'fill'}
+						<div class="sp-color-popup">
+							<div class="sp-color-popup-grid">
+								{#each colorSwatches as c}
+									<button class="zt-swatch" class:active={panelFill === c} style="background: {c}" onclick={() => { panelFill = c; panelApplyStyle(); }}></button>
+								{/each}
+								<input type="color" class="zt-color-input" bind:value={panelFill} oninput={panelApplyStyle} />
+							</div>
+							<div class="sp-color-popup-slider">
+								<span class="sp-color-popup-label">Opacity</span>
+								<input type="range" class="zt-range" min="0.1" max="1" step="0.05" bind:value={panelOpacity} oninput={panelApplyStyle} />
+								<span class="zt-range-val">{panelOpacity.toFixed(2)}</span>
+							</div>
+						</div>
+					{/if}
+				</div>
+				<div class="sp-color-item">
+					<span class="sp-section-label">Stroke</span>
+					<button class="sp-color-btn sp-color-btn-stroke" style="border-color: {panelStroke}" onclick={() => { if (spColorPopup !== 'stroke') pushUndoSnapshot(); spColorPopup = spColorPopup === 'stroke' ? null : 'stroke'; }}></button>
+					{#if spColorPopup === 'stroke'}
+						<div class="sp-color-popup">
+							<div class="sp-color-popup-grid">
+								{#each strokeSwatches as c}
+									<button class="zt-swatch" class:active={panelStroke === c} style="background: {c}" onclick={() => { panelStroke = c; panelApplyStyle(); }}></button>
+								{/each}
+								<input type="color" class="zt-color-input" bind:value={panelStroke} oninput={panelApplyStyle} />
+							</div>
+						</div>
+					{/if}
+				</div>
+			</div>
+
+			{#if !isAreaEdit && !isSpotEdit}
+			<div class="sp-section sp-section-overlay">
+				<span class="sp-section-label">Image Overlay</span>
+				{#if overlayImageUrl}
+					<div class="sp-overlay-preview">
+						<img src={overlayImageUrl} alt="Overlay" class="sp-overlay-thumb" />
+						<button class="sp-overlay-remove" onclick={clearOverlay} title="Remove overlay">&#x2715;</button>
+					</div>
+					<div class="sp-style-row">
+						<span class="sp-overlay-label">Opacity</span>
+						<input type="range" class="zt-range sp-range-full" min="0" max="1" step="0.05" bind:value={overlayOpacity} oninput={updateOverlayOpacity} onpointerdown={onOverlayOpacityStart} />
+						<span class="zt-range-val">{overlayOpacity.toFixed(2)}</span>
+					</div>
+					<button class="zt-btn sp-btn-reset" onclick={resetOverlay}>Reset Image</button>
+					{:else}
+					<label class="sp-overlay-upload">
+						<input type="file" accept="image/*" onchange={handleOverlayFile} hidden />
+						<span class="zt-btn sp-overlay-btn">Choose Image</span>
+					</label>
+				{/if}
+			</div>
+
+			<div class="sp-section sp-area-actions">
+				{#if removeZoneConfirming}
+					<span class="sp-confirm-text">Remove this zone and all its areas?</span>
+					<div class="sp-confirm-actions">
+						<button class="zt-btn zt-btn-danger" onclick={() => removeZoneInEdit(editModeTarget.zoneId)}>Remove</button>
+						<button class="zt-btn" onclick={() => removeZoneConfirming = false}>Cancel</button>
+					</div>
+				{:else}
+					<button class="zt-btn sp-btn-reset sp-area-action-btn" onclick={startRedraw}>Redraw Shape</button>
+					<button class="zt-btn zt-btn-danger sp-area-action-btn" onclick={() => removeZoneConfirming = true}>Remove Zone</button>
+				{/if}
+			</div>
+			{:else}
 			<div class="sp-section">
 				<span class="sp-section-label">Shape</span>
 				<div class="sp-style-row">
@@ -4245,7 +4543,7 @@
 							</button>
 						{/if}
 						{#each editArea.spots as spot}
-							<button class="sp-spot-card" onclick={() => switchToEditTarget({ type: 'spot', zoneId: editModeTarget.zoneId, areaId: (editModeTarget as any).areaId, spotId: spot.id })}>
+							<button class="sp-spot-card" onclick={() => selectPanelSpot(spot.id, (editModeTarget as any).areaId)}>
 								<span class="sp-spot-dot" style="background: {CATEGORY_COLORS[spot.category]}"></span>
 								<div class="sp-spot-info">
 									<span class="sp-spot-name">{spot.name}</span>
@@ -4258,6 +4556,21 @@
 							<span class="sp-empty">No spots</span>
 						{/if}
 					</div>
+				</div>
+
+				<div class="sp-section sp-area-actions">
+					{#if removeAreaConfirming}
+						<span class="sp-confirm-text">Remove "{editArea.name}"?{editArea.spots.length > 0 ? ` ${editArea.spots.length} spot(s) will be moved to Unassigned.` : ''}</span>
+						<div class="sp-confirm-actions">
+							<button class="zt-btn zt-btn-danger" onclick={() => removeAreaInEdit(editModeTarget.zoneId, (editModeTarget as any).areaId)}>Remove</button>
+							<button class="zt-btn" onclick={() => removeAreaConfirming = false}>Cancel</button>
+						</div>
+					{:else}
+						<div class="sp-area-action-row">
+							<button class="zt-btn zt-btn-danger sp-area-action-btn" onclick={() => removeAreaConfirming = true}>Remove Area</button>
+							<button class="zt-btn sp-btn-reset sp-area-action-btn" onclick={startRedraw}>Redraw Shape</button>
+						</div>
+					{/if}
 				</div>
 				{/if}
 			{:else if editZone}
@@ -4304,6 +4617,7 @@
 						{/if}
 					</div>
 				</div>
+			{/if}
 			{/if}
 			{/if}
 
@@ -4674,6 +4988,11 @@
 		align-items: center;
 	}
 
+	.sp-swatches-single-row {
+		flex-wrap: nowrap;
+		overflow: hidden;
+	}
+
 	.sp-color-grid {
 		display: grid;
 		grid-template-columns: repeat(7, 1fr);
@@ -4937,6 +5256,91 @@
 	}
 	.sp-btn-reset:hover {
 		background: #4b5563 !important;
+	}
+
+	.sp-area-actions {
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+	}
+	.sp-area-action-row {
+		display: flex;
+		gap: 8px;
+	}
+	.sp-area-action-btn {
+		flex: 1;
+	}
+	.sp-confirm-text {
+		font-size: 13px;
+		color: #fbbf24;
+		line-height: 1.4;
+	}
+	.sp-confirm-actions {
+		display: flex;
+		gap: 8px;
+	}
+
+	/* Color picker row (fill + stroke buttons side by side) */
+	.sp-color-row-section {
+		flex-direction: row;
+		gap: 12px;
+	}
+	.sp-color-item {
+		position: relative;
+		display: flex;
+		flex-direction: column;
+		align-items: flex-start;
+		gap: 4px;
+	}
+	.sp-color-btn {
+		width: 32px;
+		height: 32px;
+		border-radius: 6px;
+		border: 2px solid #475569;
+		cursor: pointer;
+		padding: 0;
+		transition: transform 0.1s;
+	}
+	.sp-color-btn:hover {
+		transform: scale(1.1);
+	}
+	.sp-color-btn-stroke {
+		background: transparent;
+		border-width: 4px;
+	}
+	.sp-color-popup {
+		position: absolute;
+		top: calc(100% + 6px);
+		left: 0;
+		z-index: 20;
+		background: #1e293b;
+		border: 1px solid #334155;
+		border-radius: 10px;
+		padding: 10px;
+		box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+		min-width: 200px;
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+	}
+	.sp-color-popup-grid {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 4px;
+		align-items: center;
+	}
+	.sp-color-popup-slider {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+	}
+	.sp-color-popup-label {
+		font-size: 11px;
+		font-weight: 600;
+		color: #94a3b8;
+		text-transform: uppercase;
+		width: 48px;
+		flex-shrink: 0;
 	}
 
 	.sp-redraw-hint {
