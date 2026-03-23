@@ -100,7 +100,7 @@
 
 	// Label placement state
 	let placingLabel = $state(false);
-	let labelMarker: any = null; // draggable label marker in edit mode
+	let labelMarkers: any[] = []; // draggable label markers in edit mode
 
 	// Add-spot-in-edit-mode state
 	let addingSpot = $state(false);
@@ -1553,26 +1553,27 @@
 		shapeToolboxPanel = null;
 	}
 
-	function addDraggableLabelMarker(entity: Zone | Area, level: string, converter?: GeoConverter) {
+	function addDraggableLabelMarker(entity: Zone | Area | Spot, level: string, converter?: GeoConverter) {
 		if (!entity.labelPosition || !map) return;
 		const L = (window as any).L;
 		const lp = converter
 			? converter.pixelToLatLng(entity.labelPosition.x, entity.labelPosition.y)
 			: { lat: entity.labelPosition.y, lng: entity.labelPosition.x };
-		const cssClass = level === 'zone' ? 'label-zone' : 'label-area';
+		const cssClass = level === 'zone' ? 'label-zone' : level === 'area' ? 'label-area' : 'label-spot';
 		const icon = L.divIcon({
 			className: `label-drag-marker ${cssClass}`,
 			html: `<span>${entity.name}</span>`,
 			iconSize: [0, 0],
 			iconAnchor: [0, 0],
 		});
-		labelMarker = L.marker([lp.lat, lp.lng], { icon, draggable: true, zIndexOffset: 1000 }).addTo(map);
+		const marker = L.marker([lp.lat, lp.lng], { icon, draggable: true, zIndexOffset: 1000 }).addTo(map);
+		labelMarkers.push(marker);
 		let dragUndoPushed = false;
-		labelMarker.on('dragstart', () => {
+		marker.on('dragstart', () => {
 			if (!dragUndoPushed) { pushUndoSnapshot(); dragUndoPushed = true; }
 		});
-		labelMarker.on('dragend', () => {
-			const pos = labelMarker.getLatLng();
+		marker.on('dragend', () => {
+			const pos = marker.getLatLng();
 			entity.labelPosition = converter
 				? converter.latLngToPixel(pos.lat, pos.lng)
 				: { x: pos.lng, y: pos.lat };
@@ -1676,7 +1677,8 @@
 		if (!zone) return;
 
 		// Clear existing
-		if (labelMarker) { map.removeLayer(labelMarker); labelMarker = null; }
+		for (const lm of labelMarkers) map.removeLayer(lm);
+		labelMarkers = [];
 		for (const sl of shapeLayers) {
 			map.removeLayer(sl);
 		}
@@ -1710,6 +1712,7 @@
 					areaLayer.addTo(map);
 					shapeLayers.push(areaLayer);
 					areaLayerMap.set(area.id, areaLayer);
+					if (area.labelPosition) { areaLayer.unbindTooltip(); addDraggableLabelMarker(area, 'area', converter); }
 
 					const handleAreaClick = () => {
 						if (placingLabel) return; // don't change selection while placing label
@@ -1844,6 +1847,7 @@
 						});
 
 						attachSpotDrag(spotLayer, spot, area.id, zone.id);
+						if (spot.labelPosition) { spotLayer.unbindTooltip(); addDraggableLabelMarker(spot, 'spot', converter); }
 					}
 				}
 			}
@@ -1878,6 +1882,7 @@
 					});
 
 					attachSpotDrag(spotLayer, spot, area.id, zone.id);
+					if (spot.labelPosition) { spotLayer.unbindTooltip(); addDraggableLabelMarker(spot, 'spot', converter); }
 				}
 			}
 		} else if (editModeTarget.type === 'spot') {
@@ -1895,6 +1900,7 @@
 				spotLayer.addTo(map);
 				shapeLayers.push(spotLayer);
 				editModeLayer = spotLayer;
+				if (spot.labelPosition) { spotLayer.unbindTooltip(); addDraggableLabelMarker(spot, 'spot', converter); }
 				spotLayer.on('click', () => {
 					zoneClickedFlag = true;
 					setTimeout(() => zoneClickedFlag = false, 0);
@@ -2087,7 +2093,8 @@
 		if (!editMode) return;
 
 		placingLabel = false;
-		if (labelMarker) { map?.removeLayer(labelMarker); labelMarker = null; }
+		for (const lm of labelMarkers) map?.removeLayer(lm);
+		labelMarkers = [];
 		cancelAddSpot();
 
 		// Cancel any active redraw first
@@ -2316,9 +2323,8 @@
 		if (entity && panelName.trim()) {
 			entity.name = panelName.trim();
 			venue = { ...venue };
-			if (labelMarker) {
-				const el = labelMarker.getElement();
-				if (el) { const span = el.querySelector('span'); if (span) span.textContent = entity.name; }
+			if ((entity as any).labelPosition) {
+				renderEditModeShapes();
 			} else if (editModeLayer) {
 				const level = editModeTarget?.type ?? 'zone';
 				const cls = `label-${level}`;
@@ -2411,6 +2417,28 @@
 				workingLayer.setLatLngs(latlngs);
 			}
 		});
+
+		// Auto-close if this vertex is near the first one
+		checkAutoClosePolygon();
+	}
+
+	/** If the last placed vertex is within pixel threshold of the first, finish the polygon */
+	function checkAutoClosePolygon() {
+		if (!map) return;
+		const drawMode = map.pm?.Draw?.Polygon;
+		if (!drawMode?._markers || drawMode._markers.length < 3) return;
+		const firstLL = drawMode._markers[0].getLatLng();
+		const lastLL = drawMode._markers[drawMode._markers.length - 1].getLatLng();
+		const firstPt = map.latLngToContainerPoint(firstLL);
+		const lastPt = map.latLngToContainerPoint(lastLL);
+		const dist = Math.sqrt(Math.pow(firstPt.x - lastPt.x, 2) + Math.pow(firstPt.y - lastPt.y, 2));
+		if (dist < 20) {
+			// Snap last vertex to first vertex position, then finish
+			drawMode._markers[drawMode._markers.length - 1].setLatLng(firstLL);
+			if (typeof drawMode._finishShape === 'function') {
+				drawMode._finishShape();
+			}
+		}
 	}
 
 	// Collect all current draw-mode vertex latlngs
@@ -3815,7 +3843,7 @@
 			// GPS mode: standard Leaflet CRS with OSM tiles
 			map = L.map(mapContainer, {
 				minZoom: 2,
-				maxZoom: 19,
+				maxZoom: 24,
 				zoomSnap: 0.5,
 				zoomDelta: 1,
 				wheelDebounceTime: 40,
@@ -3829,7 +3857,8 @@
 			tileLayerRef = L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
 				attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a> &copy; <a href="https://carto.com/">CARTO</a>',
 				subdomains: 'abcd',
-				maxZoom: 19
+				maxNativeZoom: 19,
+				maxZoom: 24
 			}).addTo(map);
 
 			const geoBounds = L.latLngBounds(
