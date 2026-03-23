@@ -37,6 +37,8 @@
 
 	// Zone layer lookup (zoneId → Leaflet layer)
 	let zoneLayerMap = new Map<string, any>();
+	// Area layer lookup (areaId → Leaflet layer)
+	let areaLayerMap = new Map<string, any>();
 
 	// Suppress moveend view saves during zone switching
 	let suppressViewSave = false;
@@ -95,6 +97,9 @@
 	let addingSpot = $state(false);
 	let addSpotName = $state('');
 	let addSpotDrawing = $state(false); // true when polygon draw is active
+
+	// Relocate zone state
+	let relocatingZoneId = $state<string>('');
 
 	// Original shape snapshot for reset
 	let editModeOriginalShapes: any = null;
@@ -189,18 +194,13 @@
 			toolbarPosition = null;
 			return;
 		}
-		const bounds = layer.getBounds();
-		const L = (window as any).L;
-		// Position to the right of the shape, vertically centered
-		const rightCenter = L.latLng(
-			(bounds.getNorth() + bounds.getSouth()) / 2,
-			bounds.getEast()
-		);
-		const point = map.latLngToContainerPoint(rightCenter);
+
 		const containerRect = mapContainer.getBoundingClientRect();
-		const x = Math.min(point.x + 20, containerRect.width - 200);
-		const y = Math.max(10, Math.min(point.y, containerRect.height - 200));
-		toolbarPosition = { x, y };
+		// All entity types: bottom-center of the map container
+		toolbarPosition = {
+			x: containerRect.width / 2,
+			y: containerRect.height - 20
+		};
 	}
 
 	function resetToolbarSubState() {
@@ -404,6 +404,68 @@
 		venue = { ...venue };
 		deselectEntity();
 		deselectZone();
+		renderExistingShapes();
+	}
+
+	function startRelocateZone() {
+		if (!editingTarget || editingTarget.type !== 'zone') return;
+		relocatingZoneId = editingTarget.zoneId;
+		deselectEntity();
+		deselectZone();
+		renderExistingShapes();
+		mapContainer.style.cursor = 'crosshair';
+	}
+
+	function handleRelocateClick(e: any) {
+		if (!relocatingZoneId) return;
+		const zone = venue.zones.find(z => z.id === relocatingZoneId);
+		if (!zone) { relocatingZoneId = ''; return; }
+
+		const converter = getGeoConverter();
+		const clickPos = converter
+			? converter.latLngToPixel(e.latlng.lat, e.latlng.lng)
+			: { x: e.latlng.lng, y: e.latlng.lat };
+
+		// Compute current zone center in pixel coords
+		let cx: number, cy: number;
+		if (zone.shape.type === 'rect') {
+			cx = zone.shape.x + zone.shape.width / 2;
+			cy = zone.shape.y + zone.shape.height / 2;
+		} else if (zone.shape.type === 'circle') {
+			cx = zone.shape.x;
+			cy = zone.shape.y;
+		} else {
+			let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+			for (let i = 0; i < zone.shape.points.length; i += 2) {
+				minX = Math.min(minX, zone.shape.points[i]);
+				maxX = Math.max(maxX, zone.shape.points[i]);
+				minY = Math.min(minY, zone.shape.points[i + 1]);
+				maxY = Math.max(maxY, zone.shape.points[i + 1]);
+			}
+			cx = (minX + maxX) / 2;
+			cy = (minY + maxY) / 2;
+		}
+
+		const dx = clickPos.x - cx;
+		const dy = clickPos.y - cy;
+
+		zone.shape = applyDelta(zone.shape, dx, dy);
+		if (zone.labelPosition) {
+			zone.labelPosition = { x: zone.labelPosition.x + dx, y: zone.labelPosition.y + dy };
+		}
+		for (const area of zone.areas) {
+			area.shape = applyDelta(area.shape, dx, dy);
+			if (area.labelPosition) {
+				area.labelPosition = { x: area.labelPosition.x + dx, y: area.labelPosition.y + dy };
+			}
+			for (const spot of area.spots) {
+				spot.shape = applyDelta(spot.shape, dx, dy);
+			}
+		}
+
+		venue = { ...venue };
+		relocatingZoneId = '';
+		mapContainer.style.cursor = '';
 		renderExistingShapes();
 	}
 
@@ -1408,6 +1470,7 @@
 		}
 		shapeLayers = [];
 		editModeLayer = null;
+		areaLayerMap = new Map();
 
 		if (editModeTarget.type === 'zone') {
 			// Editing a zone: show zone + all its areas + spots
@@ -1424,11 +1487,141 @@
 				});
 			}
 			for (const area of zone.areas) {
+				const areaChildLayers: any[] = [];
 				const areaLayer = shapeDefToLayer(area.shape, area.style, area.name, 'area', converter, area.labelPosition);
-				if (areaLayer) { areaLayer.addTo(map); shapeLayers.push(areaLayer); }
+				if (areaLayer) {
+					areaLayer.addTo(map);
+					shapeLayers.push(areaLayer);
+					areaLayerMap.set(area.id, areaLayer);
+
+					const handleAreaClick = () => {
+						zoneClickedFlag = true;
+						setTimeout(() => zoneClickedFlag = false, 0);
+						if (editingTarget?.type === 'area' && editingTarget.areaId === area.id) {
+							deselectEntity();
+						} else {
+							selectEntityForToolbar({ type: 'area', zoneId: zone.id, areaId: area.id }, areaLayer);
+						}
+					};
+
+					// Leaflet click handler for area selection
+					areaLayer.on('click', (e: any) => {
+						if (e.originalEvent) e.originalEvent.stopPropagation();
+						handleAreaClick();
+					});
+
+					// Native pointerdown for drag-to-move
+					const areaEl = areaLayer.getElement();
+					if (areaEl) {
+						areaEl.style.cursor = 'grab';
+						areaEl.addEventListener('pointerdown', (pe: PointerEvent) => {
+							if (pe.button !== 0) return;
+							pe.stopImmediatePropagation();
+							zoneClickedFlag = true;
+							map.dragging.disable();
+
+							const startPoint = map.mouseEventToContainerPoint(pe);
+							const startLatLng = map.containerPointToLatLng(startPoint);
+							let prevLatLng = startLatLng;
+							let dragging = false;
+
+							const onPointerMove = (moveEvt: PointerEvent) => {
+								const curPoint = map.mouseEventToContainerPoint(moveEvt);
+								if (!dragging) {
+									const ddx = curPoint.x - startPoint.x;
+									const ddy = curPoint.y - startPoint.y;
+									if (Math.sqrt(ddx * ddx + ddy * ddy) > 3) {
+										dragging = true;
+										isDragging = true;
+										areaEl.style.cursor = 'grabbing';
+										areaLayer.setStyle({ weight: 3, dashArray: '6 4', color: '#facc15' });
+										for (const cl of areaChildLayers) {
+											cl.setStyle?.({ opacity: 0, fillOpacity: 0 });
+											cl.unbindTooltip?.();
+										}
+									}
+								}
+								if (dragging) {
+									const curLatLng = map.containerPointToLatLng(curPoint);
+									const dlat = curLatLng.lat - prevLatLng.lat;
+									const dlng = curLatLng.lng - prevLatLng.lng;
+									if (areaLayer.setBounds && areaLayer instanceof L.Rectangle) {
+										const b = areaLayer.getBounds();
+										areaLayer.setBounds(L.latLngBounds(
+											[b.getSouth() + dlat, b.getWest() + dlng],
+											[b.getNorth() + dlat, b.getEast() + dlng]
+										));
+									} else if (areaLayer.getLatLngs) {
+										const latlngs = areaLayer.getLatLngs()[0].map((ll: any) => L.latLng(ll.lat + dlat, ll.lng + dlng));
+										areaLayer.setLatLngs(latlngs);
+									}
+									prevLatLng = curLatLng;
+								}
+							};
+
+							const onPointerUp = (upEvt: PointerEvent) => {
+								document.removeEventListener('pointermove', onPointerMove);
+								document.removeEventListener('pointerup', onPointerUp);
+								map.dragging.enable();
+								if (dragging) {
+									const endPoint = map.mouseEventToContainerPoint(upEvt);
+									const endLatLng = map.containerPointToLatLng(endPoint);
+									const conv = getGeoConverter();
+									let dx: number, dy: number;
+									if (conv) {
+										const startPx = conv.latLngToPixel(startLatLng.lat, startLatLng.lng);
+										const endPx = conv.latLngToPixel(endLatLng.lat, endLatLng.lng);
+										dx = endPx.x - startPx.x;
+										dy = endPx.y - startPx.y;
+									} else {
+										dx = endLatLng.lng - startLatLng.lng;
+										dy = endLatLng.lat - startLatLng.lat;
+									}
+									const z = venue.zones.find(zn => zn.id === zone.id);
+									const a = z?.areas.find(ar => ar.id === area.id);
+									if (a) {
+										a.shape = applyDelta(a.shape, dx, dy);
+										if (a.labelPosition) a.labelPosition = { x: a.labelPosition.x + dx, y: a.labelPosition.y + dy };
+										for (const s of a.spots) {
+											s.shape = applyDelta(s.shape, dx, dy);
+										}
+									}
+									venue = { ...venue };
+									isDragging = false;
+									const areaId = area.id;
+									renderEditModeShapes();
+									const newAreaLayer = areaLayerMap.get(areaId);
+									if (newAreaLayer) {
+										selectEntityForToolbar({ type: 'area', zoneId: zone.id, areaId: areaId }, newAreaLayer);
+									}
+								}
+								setTimeout(() => { zoneClickedFlag = false; }, 300);
+							};
+
+							document.addEventListener('pointermove', onPointerMove);
+							document.addEventListener('pointerup', onPointerUp);
+						});
+					}
+				}
+
 				for (const spot of area.spots) {
 					const spotLayer = shapeDefToLayer(spot.shape, spot.style, spot.name, 'spot', converter);
-					if (spotLayer) { spotLayer.addTo(map); shapeLayers.push(spotLayer); }
+					if (spotLayer) {
+						spotLayer.addTo(map);
+						shapeLayers.push(spotLayer);
+						areaChildLayers.push(spotLayer);
+
+						spotLayer.on('click', (e: any) => {
+							if (e.originalEvent) e.originalEvent.stopPropagation();
+							zoneClickedFlag = true;
+							setTimeout(() => zoneClickedFlag = false, 0);
+							if (editingTarget?.type === 'spot' && (editingTarget as any).spotId === spot.id) {
+								deselectEntity();
+							} else {
+								selectEntityForToolbar({ type: 'spot', zoneId: zone.id, areaId: area.id, spotId: spot.id }, spotLayer);
+							}
+						});
+					}
 				}
 			}
 		} else if (editModeTarget.type === 'area') {
@@ -1631,21 +1824,10 @@
 		});
 		map.pm.removeControls();
 
-		// Invalidate map size since the container changed back, then fit to venue bounds
+		// Invalidate map size since the container changed back (keep current view position)
 		setTimeout(() => {
 			if (!map) return;
 			map.invalidateSize();
-			const L = (window as any).L;
-			const converter = getGeoConverter();
-			if (converter && venue.geoBounds) {
-				const geoBounds = L.latLngBounds(
-					[venue.geoBounds.sw[0], venue.geoBounds.sw[1]],
-					[venue.geoBounds.ne[0], venue.geoBounds.ne[1]]
-				);
-				map.fitBounds(geoBounds);
-			} else {
-				map.fitBounds([[0, 0], [venue.height, venue.width]]);
-			}
 		}, 50);
 	}
 
@@ -2717,11 +2899,8 @@
 		// Deselect previous entity toolbar if it was an area
 		deselectEntity();
 
-		// Deselect previous zone drag without re-rendering
+		// Deselect previous zone without re-rendering
 		if (editingLayer && editingLayer !== layer) {
-			editingLayer.pm.disableLayerDrag();
-			editingLayer.off('pm:dragend');
-			editingLayer.off('pm:dragstart');
 			const prevZone = venue.zones.find(z => z.id === editingZoneId);
 			if (prevZone) {
 				editingLayer.setStyle({
@@ -2734,17 +2913,8 @@
 
 		editingZoneId = zoneId;
 		editingLayer = layer;
-		const zone = venue.zones.find(z => z.id === zoneId);
-		if (zone) {
-			editingOriginalShape = zone.shape.type === 'polygon'
-				? { ...zone.shape, points: [...zone.shape.points] }
-				: { ...zone.shape };
-		}
 
 		layer.setStyle({ weight: 3, dashArray: '6 4', color: '#facc15' });
-		layer.pm.enableLayerDrag();
-		layer.on('pm:dragstart', () => { isDragging = true; });
-		layer.on('pm:dragend', () => handleZoneDragEnd(layer));
 
 		// Set toolbar target to the zone
 		selectEntityForToolbar({ type: 'zone', zoneId }, layer);
@@ -2753,9 +2923,6 @@
 	function deselectZone() {
 		deselectEntity();
 		if (editingLayer) {
-			editingLayer.pm.disableLayerDrag();
-			editingLayer.off('pm:dragend');
-			editingLayer.off('pm:dragstart');
 			const prevZone = venue.zones.find(z => z.id === editingZoneId);
 			if (prevZone) {
 				editingLayer.setStyle({
@@ -2819,6 +2986,7 @@
 			}
 		}
 		if (e.key === 'Escape') {
+			if (relocatingZoneId) { relocatingZoneId = ''; mapContainer.style.cursor = ''; return; }
 			if (redrawActive) { cancelRedraw(); return; }
 			if (editMode) return; // Edit mode only closes via Done button
 			if (resizeActive && editingTargetLayer) {
@@ -2955,6 +3123,7 @@
 		}
 
 		zoneLayerMap = new Map();
+		areaLayerMap = new Map();
 
 		// Filter zones based on activeZoneId
 		const zonesToRender = activeZoneId
@@ -2964,124 +3133,37 @@
 		for (const zone of zonesToRender) {
 			const zoneChildLayers: any[] = [];
 
-			// Render zone shape
+			// Render zone shape in zonePane (lower z-index so areas stay clickable on top)
 			const zoneLayer = shapeDefToLayer(zone.shape, zone.style, zone.name, 'zone', converter, zone.labelPosition);
 			if (zoneLayer) {
+				zoneLayer.unbindTooltip();
+				zoneLayer.options.pane = 'zonePane';
 				zoneLayer.addTo(map);
 				shapeLayers.push(zoneLayer);
 				zoneLayerMap.set(zone.id, zoneLayer);
-
-				const handleZoneClick = () => {
-					zoneClickedFlag = true;
-					setTimeout(() => zoneClickedFlag = false, 0);
-					if (editingTarget?.type === 'zone' && editingTarget.zoneId === zone.id) {
-						deselectZone();
-					} else {
-						selectZoneForDrag(zone.id, zoneLayer);
-					}
-				};
-				zoneLayer.on('click', handleZoneClick);
-				makeTooltipClickable(zoneLayer, handleZoneClick);
-
-				// Move-handle marker at bottom-center of zone bounds
-				const bounds = zoneLayer.getBounds();
-				const bottomCenter = L.latLng(bounds.getSouth(), (bounds.getWest() + bounds.getEast()) / 2);
-				const moveIcon = L.divIcon({
-					className: 'zone-move-handle-container',
-					html: `<div class="zone-move-handle"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="5 9 2 12 5 15"/><polyline points="9 5 12 2 15 5"/><polyline points="15 19 12 22 9 19"/><polyline points="19 9 22 12 19 15"/><line x1="2" y1="12" x2="22" y2="12"/><line x1="12" y1="2" x2="12" y2="22"/></svg></div>`,
-					iconSize: [28, 28],
-					iconAnchor: [14, 14],
-				});
-				const moveMarker = L.marker(bottomCenter, { icon: moveIcon, interactive: true, draggable: true, zIndexOffset: 500 }).addTo(map);
-				shapeLayers.push(moveMarker);
-
-				let markerDragPrev: any = null;
-				let markerDragStart: any = null;
-
-				moveMarker.on('dragstart', () => {
-					isDragging = true;
-					markerDragStart = moveMarker.getLatLng();
-					markerDragPrev = markerDragStart;
-
-					// Visual selection
-					deselectEntity();
-					zoneLayer.setStyle({ weight: 3, dashArray: '6 4', color: '#facc15' });
-
-					// Hide zone tooltip and child layers (areas/spots) during drag
-					zoneLayer.unbindTooltip();
-					for (const cl of zoneChildLayers) {
-						cl.setStyle?.({ opacity: 0, fillOpacity: 0 });
-						cl.unbindTooltip?.();
-					}
-				});
-
-				moveMarker.on('drag', () => {
-					if (!markerDragPrev) return;
-					const cur = moveMarker.getLatLng();
-					const dlat = cur.lat - markerDragPrev.lat;
-					const dlng = cur.lng - markerDragPrev.lng;
-
-					// Shift zone layer — use setBounds for Rectangle, setLatLngs for Polygon
-					if (zoneLayer.setBounds && zoneLayer instanceof L.Rectangle) {
-						const b = zoneLayer.getBounds();
-						zoneLayer.setBounds(L.latLngBounds(
-							[b.getSouth() + dlat, b.getWest() + dlng],
-							[b.getNorth() + dlat, b.getEast() + dlng]
-						));
-					} else if (zoneLayer.getLatLngs) {
-						const latlngs = zoneLayer.getLatLngs()[0].map((ll: any) => L.latLng(ll.lat + dlat, ll.lng + dlng));
-						zoneLayer.setLatLngs(latlngs);
-					}
-
-					markerDragPrev = cur;
-				});
-
-				moveMarker.on('dragend', () => {
-					if (markerDragStart) {
-						const end = moveMarker.getLatLng();
-						const conv = getGeoConverter();
-
-						// Compute pixel delta from the lat/lng movement
-						let dx: number, dy: number;
-						if (conv) {
-							const startPx = conv.latLngToPixel(markerDragStart.lat, markerDragStart.lng);
-							const endPx = conv.latLngToPixel(end.lat, end.lng);
-							dx = endPx.x - startPx.x;
-							dy = endPx.y - startPx.y;
+				// Native mousedown on SVG element — stopImmediatePropagation prevents
+				// the event from reaching Leaflet's map drag handler on the container
+				const zoneEl = zoneLayer.getElement();
+				if (zoneEl) {
+					zoneEl.style.cursor = 'pointer';
+					zoneEl.addEventListener('pointerdown', (pe: PointerEvent) => {
+						if (pe.button !== 0) return;
+						pe.stopImmediatePropagation();
+						pe.preventDefault();
+						zoneClickedFlag = true;
+						// Toggle zone selection (click only, no drag)
+						if (editingTarget?.type === 'zone' && editingTarget.zoneId === zone.id) {
+							deselectZone();
 						} else {
-							dx = end.lng - markerDragStart.lng;
-							dy = end.lat - markerDragStart.lat;
+							selectZoneForDrag(zone.id, zoneLayer);
 						}
-
-						const z = venue.zones.find(zn => zn.id === zone.id);
-						if (z) {
-							z.shape = applyDelta(z.shape, dx, dy);
-							if (z.labelPosition) {
-								z.labelPosition = { x: z.labelPosition.x + dx, y: z.labelPosition.y + dy };
-							}
-							for (const a of z.areas) {
-								a.shape = applyDelta(a.shape, dx, dy);
-								if (a.labelPosition) {
-									a.labelPosition = { x: a.labelPosition.x + dx, y: a.labelPosition.y + dy };
-								}
-								for (const s of a.spots) {
-									s.shape = applyDelta(s.shape, dx, dy);
-								}
-							}
-						}
-						venue = { ...venue };
-					}
-					markerDragPrev = null;
-					markerDragStart = null;
-					isDragging = false;
-					renderExistingShapes();
-				});
-
-				// Click without drag → select zone for toolbar
-				moveMarker.on('click', (e: any) => {
-					L.DomEvent.stopPropagation(e);
-					selectZoneForDrag(zone.id, zoneLayer);
-				});
+						setTimeout(() => { zoneClickedFlag = false; }, 300);
+					});
+					// Prevent click from bubbling to map container (which would deselect the zone)
+					zoneEl.addEventListener('click', (e: Event) => {
+						e.stopPropagation();
+					});
+				}
 			}
 
 			for (const area of zone.areas) {
@@ -3090,37 +3172,6 @@
 					areaLayer.addTo(map);
 					shapeLayers.push(areaLayer);
 					zoneChildLayers.push(areaLayer);
-
-					const handleAreaClick = () => {
-						zoneClickedFlag = true;
-						setTimeout(() => zoneClickedFlag = false, 0);
-						// Deselect zone drag if active
-						if (editingZoneId) {
-							editingLayer?.pm.disableLayerDrag();
-							editingLayer?.off('pm:dragend');
-							editingLayer?.off('pm:dragstart');
-							const prevZone = venue.zones.find(z => z.id === editingZoneId);
-							if (prevZone && editingLayer) {
-								editingLayer.setStyle({
-									color: prevZone.style.stroke ?? '#cbd5e1',
-									weight: prevZone.style.strokeWidth ?? 1,
-									dashArray: ''
-								});
-							}
-							editingZoneId = '';
-							editingLayer = null;
-							editingOriginalShape = null;
-						}
-						// Toggle area selection
-						if (editingTarget?.type === 'area' && editingTarget.areaId === area.id) {
-							deselectEntity();
-						} else {
-							selectEntityForToolbar({ type: 'area', zoneId: zone.id, areaId: area.id }, areaLayer);
-						}
-					};
-
-					areaLayer.on('click', handleAreaClick);
-					makeTooltipClickable(areaLayer, handleAreaClick);
 				}
 
 				for (const spot of area.spots) {
@@ -3129,37 +3180,6 @@
 						spotLayer.addTo(map);
 						shapeLayers.push(spotLayer);
 						zoneChildLayers.push(spotLayer);
-
-						const handleSpotClick = () => {
-							zoneClickedFlag = true;
-							setTimeout(() => zoneClickedFlag = false, 0);
-							// Deselect zone drag if active
-							if (editingZoneId) {
-								editingLayer?.pm.disableLayerDrag();
-								editingLayer?.off('pm:dragend');
-								editingLayer?.off('pm:dragstart');
-								const prevZone = venue.zones.find(z => z.id === editingZoneId);
-								if (prevZone && editingLayer) {
-									editingLayer.setStyle({
-										color: prevZone.style.stroke ?? '#cbd5e1',
-										weight: prevZone.style.strokeWidth ?? 1,
-										dashArray: ''
-									});
-								}
-								editingZoneId = '';
-								editingLayer = null;
-								editingOriginalShape = null;
-							}
-							// Toggle spot selection
-							if (editingTarget?.type === 'spot' && (editingTarget as any).spotId === spot.id) {
-								deselectEntity();
-							} else {
-								selectEntityForToolbar({ type: 'spot', zoneId: zone.id, areaId: area.id, spotId: spot.id }, spotLayer);
-							}
-						};
-
-						spotLayer.on('click', handleSpotClick);
-						makeTooltipClickable(spotLayer, handleSpotClick);
 					}
 				}
 			}
@@ -3344,6 +3364,10 @@
 
 		}
 
+		// Create a lower z-index pane for zone shapes so areas (in overlayPane z:400) stay on top
+		map.createPane('zonePane');
+		map.getPane('zonePane')!.style.zIndex = '350';
+
 		// Enable geoman without toolbar UI
 		map.pm.addControls({
 			position: 'bottomright',
@@ -3370,6 +3394,10 @@
 
 		// Click on map background deselects zone/area
 		map.on('click', (e: any) => {
+			if (relocatingZoneId) {
+				handleRelocateClick(e);
+				return;
+			}
 			if (placingLabel && editModeTarget && editModeTarget.type !== 'spot') {
 				const converter = getGeoConverter();
 				const pos = converter
@@ -3386,6 +3414,8 @@
 			if (zoneClickedFlag) return;
 			if (editMode) {
 				if (redrawActive || addSpotDrawing) return; // don't select anything during draw
+				// Deselect area/spot toolbar if active
+				if (editingTarget) deselectEntity();
 				// If click is within overlay bounds, select overlay
 				if (overlayLayer && overlayLayer.getBounds().contains(e.latlng) && editModeSelection !== 'overlay') {
 					selectEditModeItem('overlay');
@@ -3563,7 +3593,15 @@
 			{#if venueGeoBounds}
 				<button
 					class="map-fab"
-					onclick={(e) => { e.stopPropagation(); map?.flyToBounds(venueGeoBounds, { duration: 0.8 }); }}
+					onclick={(e) => {
+						e.stopPropagation();
+						const zoneLayer = activeZoneId ? zoneLayerMap.get(activeZoneId) : null;
+						if (zoneLayer) {
+							map?.flyToBounds(zoneLayer.getBounds().pad(0.2), { duration: 0.8 });
+						} else {
+							map?.flyToBounds(venueGeoBounds, { duration: 0.8 });
+						}
+					}}
 					title="Back to venue bounds"
 				>
 					<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -3628,13 +3666,20 @@
 			</div>
 		{/if}
 
-		{#if !editMode && toolbarPosition && editingTarget && !isDragging}
+		{#if relocatingZoneId}
+		<div class="relocate-banner">
+			Click on the map to place the zone — <button class="relocate-cancel" onclick={() => { relocatingZoneId = ''; mapContainer.style.cursor = ''; }}>Cancel</button>
+		</div>
+	{/if}
+
+	{#if toolbarPosition && editingTarget && !isDragging && (!editMode || (editingTarget.type === 'area' || editingTarget.type === 'spot'))}
 			{@const editingEntity = getEditingEntity()}
 			{#if editingEntity}
 				<!-- svelte-ignore a11y_no_static_element_interactions -->
 			<!-- svelte-ignore a11y_click_events_have_key_events -->
 				<div
 					class="zone-toolbar"
+					class:zone-toolbar-bottom={true}
 					style="left: {toolbarPosition.x}px; top: {toolbarPosition.y}px;"
 					onmousedown={(e) => e.stopPropagation()}
 					onclick={(e) => e.stopPropagation()}
@@ -3718,9 +3763,21 @@
 						</div>
 						<button class="zt-btn zt-btn-primary" onclick={handleStyleConfirm}>Done</button>
 					{:else}
-						<button class="zt-btn zt-btn-primary" onclick={enterEditMode}>Edit</button>
-						<button class="zt-btn" onclick={handleDuplicate}>Duplicate</button>
-						<button class="zt-btn zt-btn-danger" onclick={() => deleteConfirming = true}>Delete</button>
+						<button class="zt-btn zt-btn-primary" onclick={enterEditMode} title="Edit">
+							<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+						</button>
+						{#if editingTarget?.type === 'zone'}
+							<button class="zt-btn" onclick={startRelocateZone} title="Relocate">
+								<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="5 9 2 12 5 15"/><polyline points="9 5 12 2 15 5"/><polyline points="15 19 12 22 9 19"/><polyline points="19 9 22 12 19 15"/><line x1="2" y1="12" x2="22" y2="12"/><line x1="12" y1="2" x2="12" y2="22"/></svg>
+							</button>
+						{:else}
+							<button class="zt-btn" onclick={handleDuplicate} title="Duplicate">
+								<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+							</button>
+						{/if}
+						<button class="zt-btn zt-btn-danger" onclick={() => deleteConfirming = true} title="Delete">
+							<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+						</button>
 					{/if}
 				</div>
 			{/if}
@@ -4715,6 +4772,15 @@
 		min-width: 180px;
 	}
 
+	.zone-toolbar-bottom {
+		transform: translate(-50%, -100%);
+		flex-direction: row;
+		flex-wrap: wrap;
+		align-items: center;
+		justify-content: center;
+		min-width: auto;
+	}
+
 	.zt-title {
 		font-size: 14px;
 		font-weight: 600;
@@ -5024,6 +5090,34 @@
 		cursor: not-allowed;
 	}
 
+	.relocate-banner {
+		position: absolute;
+		top: 12px;
+		left: 50%;
+		transform: translateX(-50%);
+		z-index: 1000;
+		background: #1e293b;
+		border: 1px solid #818cf8;
+		color: #e2e8f0;
+		padding: 8px 16px;
+		border-radius: 8px;
+		font-size: 13px;
+		font-weight: 500;
+		box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+		white-space: nowrap;
+	}
+
+	.relocate-cancel {
+		background: none;
+		border: none;
+		color: #818cf8;
+		cursor: pointer;
+		font-size: 13px;
+		font-weight: 600;
+		text-decoration: underline;
+		padding: 0;
+	}
+
 	.editing-badge {
 		font-size: 13px;
 		font-weight: 600;
@@ -5060,31 +5154,6 @@
 
 	:global(.label-spot) {
 		font-size: 10px !important;
-	}
-
-	:global(.zone-move-handle-container) {
-		background: transparent !important;
-		border: none !important;
-		box-shadow: none !important;
-	}
-	:global(.zone-move-handle) {
-		width: 28px;
-		height: 28px;
-		background: #1e293b;
-		border: 2px solid #475569;
-		border-radius: 6px;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		cursor: pointer;
-		color: #94a3b8;
-		box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
-		transition: all 0.15s;
-	}
-	:global(.zone-move-handle:hover) {
-		background: #334155;
-		color: #f1f5f9;
-		border-color: #818cf8;
 	}
 
 	/* Geocoder FAB styling — lives inside .fab-column */
