@@ -173,6 +173,21 @@
 		return createGeoConverter(venue.geoBounds, venue.width, venue.height);
 	}
 
+	function getShapeCenter(shape: ShapeDef): { x: number; y: number } {
+		if (shape.type === 'rect') {
+			return { x: shape.x + shape.width / 2, y: shape.y + shape.height / 2 };
+		} else if (shape.type === 'circle') {
+			return { x: shape.x, y: shape.y };
+		} else {
+			let sx = 0, sy = 0, n = shape.points.length / 2;
+			for (let i = 0; i < shape.points.length; i += 2) {
+				sx += shape.points[i];
+				sy += shape.points[i + 1];
+			}
+			return { x: sx / n, y: sy / n };
+		}
+	}
+
 	function layerToShapeDef(layer: any): ShapeDef {
 		const L = (window as any).L;
 		if (layer instanceof L.Circle) {
@@ -715,6 +730,8 @@
 			if (editModeLayer) {
 				map.fitBounds(editModeLayer.getBounds().pad(0.2));
 			}
+			// Auto-enable vertex editing on the main shape
+			selectEditModeItem('shape');
 		}, 50);
 	}
 
@@ -1564,6 +1581,93 @@
 		});
 	}
 
+	function attachSpotDrag(spotLayer: any, spot: Spot, areaId: string, zoneId: string) {
+		const L = (window as any).L;
+		const spotEl = spotLayer.getElement?.();
+		if (!spotEl) return;
+		spotEl.style.cursor = 'grab';
+		spotEl.addEventListener('pointerdown', (pe: PointerEvent) => {
+			if (pe.button !== 0) return;
+			if (addSpotDrawing || addAreaDrawing || redrawActive) return;
+			pe.stopImmediatePropagation();
+			spotClickedFlag = true;
+			zoneClickedFlag = true;
+			map.dragging.disable();
+
+			const startPoint = map.mouseEventToContainerPoint(pe);
+			const startLatLng = map.containerPointToLatLng(startPoint);
+			let prevLatLng = startLatLng;
+			let dragging = false;
+
+			const onPointerMove = (moveEvt: PointerEvent) => {
+				const curPoint = map.mouseEventToContainerPoint(moveEvt);
+				if (!dragging) {
+					const ddx = curPoint.x - startPoint.x;
+					const ddy = curPoint.y - startPoint.y;
+					if (Math.sqrt(ddx * ddx + ddy * ddy) > 3) {
+						dragging = true;
+						isDragging = true;
+						spotEl.style.cursor = 'grabbing';
+						spotLayer.setStyle({ weight: 3, dashArray: '6 4', color: '#facc15' });
+					}
+				}
+				if (dragging) {
+					const curLatLng = map.containerPointToLatLng(curPoint);
+					const dlat = curLatLng.lat - prevLatLng.lat;
+					const dlng = curLatLng.lng - prevLatLng.lng;
+					if (spotLayer.setBounds && spotLayer instanceof L.Rectangle) {
+						const b = spotLayer.getBounds();
+						spotLayer.setBounds(L.latLngBounds(
+							[b.getSouth() + dlat, b.getWest() + dlng],
+							[b.getNorth() + dlat, b.getEast() + dlng]
+						));
+					} else if (spotLayer.getLatLngs) {
+						const latlngs = spotLayer.getLatLngs()[0].map((ll: any) => L.latLng(ll.lat + dlat, ll.lng + dlng));
+						spotLayer.setLatLngs(latlngs);
+					}
+					prevLatLng = curLatLng;
+				}
+			};
+
+			const onPointerUp = (upEvt: PointerEvent) => {
+				document.removeEventListener('pointermove', onPointerMove);
+				document.removeEventListener('pointerup', onPointerUp);
+				map.dragging.enable();
+				if (dragging) {
+					pushUndoSnapshot();
+					const endPoint = map.mouseEventToContainerPoint(upEvt);
+					const endLatLng = map.containerPointToLatLng(endPoint);
+					const conv = getGeoConverter();
+					let dx: number, dy: number;
+					if (conv) {
+						const startPx = conv.latLngToPixel(startLatLng.lat, startLatLng.lng);
+						const endPx = conv.latLngToPixel(endLatLng.lat, endLatLng.lng);
+						dx = endPx.x - startPx.x;
+						dy = endPx.y - startPx.y;
+					} else {
+						dx = endLatLng.lng - startLatLng.lng;
+						dy = endLatLng.lat - startLatLng.lat;
+					}
+					const z = venue.zones.find(zn => zn.id === zoneId);
+					const a = z?.areas.find(ar => ar.id === areaId);
+					const s = a?.spots.find(sp => sp.id === spot.id);
+					if (s) {
+						s.shape = applyDelta(s.shape, dx, dy);
+					}
+					venue = { ...venue };
+					isDragging = false;
+					const spotId = spot.id;
+					renderEditModeShapes();
+					selectPanelSpot(spotId, areaId);
+				}
+				setTimeout(() => { spotClickedFlag = false; zoneClickedFlag = false; }, 300);
+			};
+
+			document.addEventListener('pointermove', onPointerMove);
+			document.addEventListener('pointerup', onPointerUp);
+		});
+	}
+
 	function renderEditModeShapes() {
 		if (!map || !editModeTarget) return;
 		const L = (window as any).L;
@@ -1590,6 +1694,7 @@
 				editModeLayer = zoneLayer;
 				if (zone.labelPosition) { zoneLayer.unbindTooltip(); addDraggableLabelMarker(zone, 'zone', converter); }
 				zoneLayer.on('click', () => {
+					if (placingLabel) return; // don't clear panels while placing label
 					zoneClickedFlag = true;
 					setTimeout(() => zoneClickedFlag = false, 0);
 					if (editingTarget) deselectEntity(); // deselect any selected area/spot
@@ -1607,6 +1712,7 @@
 					areaLayerMap.set(area.id, areaLayer);
 
 					const handleAreaClick = () => {
+						if (placingLabel) return; // don't change selection while placing label
 						if (addSpotDrawing || addAreaDrawing || redrawActive) return;
 						if (spotClickedFlag) return; // spot takes priority
 						zoneClickedFlag = true;
@@ -1692,6 +1798,7 @@
 										dx = endLatLng.lng - startLatLng.lng;
 										dy = endLatLng.lat - startLatLng.lat;
 									}
+									pushUndoSnapshot();
 									const z = venue.zones.find(zn => zn.id === zone.id);
 									const a = z?.areas.find(ar => ar.id === area.id);
 									if (a) {
@@ -1717,7 +1824,7 @@
 				}
 
 				for (const spot of area.spots) {
-					const spotLayer = shapeDefToLayer(spot.shape, spot.style, spot.name, 'spot', converter);
+					const spotLayer = shapeDefToLayer(spot.shape, spot.style, spot.name, 'spot', converter, spot.labelPosition);
 					if (spotLayer) {
 						spotLayer.addTo(map);
 						shapeLayers.push(spotLayer);
@@ -1725,6 +1832,7 @@
 						spotLayerMap.set(spot.id, spotLayer);
 
 						spotLayer.on('click', (e: any) => {
+							if (placingLabel) return; // don't change selection while placing label
 							if (e.originalEvent) e.originalEvent.stopPropagation();
 							spotClickedFlag = true;
 							zoneClickedFlag = true;
@@ -1734,6 +1842,8 @@
 							if (editPanelAreaId) unhighlightPanelArea();
 							selectPanelSpot(spot.id, area.id);
 						});
+
+						attachSpotDrag(spotLayer, spot, area.id, zone.id);
 					}
 				}
 			}
@@ -1755,19 +1865,19 @@
 				});
 			}
 			for (const spot of area.spots) {
-				const spotLayer = shapeDefToLayer(spot.shape, spot.style, spot.name, 'spot', converter);
+				const spotLayer = shapeDefToLayer(spot.shape, spot.style, spot.name, 'spot', converter, spot.labelPosition);
 				if (spotLayer) {
 					spotLayer.addTo(map);
 					shapeLayers.push(spotLayer);
 					spotLayerMap.set(spot.id, spotLayer);
-					const el = spotLayer.getElement?.();
-					if (el) el.style.cursor = 'pointer';
 					spotLayer.on('click', () => {
 						zoneClickedFlag = true;
 						setTimeout(() => zoneClickedFlag = false, 0);
 						deselectEditModeItem();
 						selectPanelSpot(spot.id, area.id);
 					});
+
+					attachSpotDrag(spotLayer, spot, area.id, zone.id);
 				}
 			}
 		} else if (editModeTarget.type === 'spot') {
@@ -1780,7 +1890,7 @@
 			}
 			const spot = area.spots.find(s => s.id === (editModeTarget as any).spotId);
 			if (!spot) return;
-			const spotLayer = shapeDefToLayer(spot.shape, spot.style, spot.name, 'spot', converter);
+			const spotLayer = shapeDefToLayer(spot.shape, spot.style, spot.name, 'spot', converter, spot.labelPosition);
 			if (spotLayer) {
 				spotLayer.addTo(map);
 				shapeLayers.push(spotLayer);
@@ -1873,10 +1983,12 @@
 	}
 
 	function completeAddSpot(layer: any) {
-		if (!editModeTarget || editModeTarget.type !== 'area') return;
+		if (!editModeTarget) return;
 		const zone = venue.zones.find(z => z.id === editModeTarget.zoneId);
 		if (!zone) return;
-		const area = zone.areas.find(a => a.id === (editModeTarget as any).areaId);
+		// Support both direct area edit and panelArea (zone edit with area selected)
+		const areaId = editModeTarget.type === 'area' ? (editModeTarget as any).areaId : editPanelAreaId;
+		const area = zone.areas.find(a => a.id === areaId);
 		if (!area) return;
 
 		let shapeDef = layerToShapeDef(layer);
@@ -1890,7 +2002,8 @@
 			description: '',
 			category: 'info',
 			shape: shapeDef,
-			style: defaultStyle('spot', 'info')
+			style: defaultStyle('spot', 'info'),
+			labelPosition: getShapeCenter(shapeDef)
 		};
 		area.spots = [...area.spots, spot];
 		venue = { ...venue };
@@ -1951,7 +2064,8 @@
 			category: 'info',
 			shape: shapeDef,
 			style: defaultStyle('area', 'info'),
-			spots: []
+			spots: [],
+			labelPosition: getShapeCenter(shapeDef)
 		};
 		zone.areas = [...zone.areas, area];
 		venue = { ...venue };
@@ -2043,6 +2157,25 @@
 		enterEditModeForTarget(target);
 	}
 
+	/** Save vertex edits on a panel child layer (area or spot) back to data */
+	function savePanelChildShape(layer: any, areaId: string, spotId: string | null) {
+		pushUndoSnapshot();
+		const converter = getGeoConverter();
+		let ns = layerToShapeDef(layer);
+		if (converter) ns = converter.shapeToPixel(ns);
+		const zone = venue.zones.find(z => z.id === editModeTarget?.zoneId);
+		if (!zone) return;
+		if (spotId) {
+			const area = zone.areas.find(a => a.id === areaId);
+			const spot = area?.spots.find(s => s.id === spotId);
+			if (spot) spot.shape = ns;
+		} else {
+			const area = zone.areas.find(a => a.id === areaId);
+			if (area) area.shape = ns;
+		}
+		venue = { ...venue };
+	}
+
 	/** Show area details in sidebar without changing the canvas (zone stays rendered) */
 	function selectPanelArea(areaId: string) {
 		spColorPopup = null;
@@ -2051,10 +2184,15 @@
 			unhighlightPanelArea();
 		}
 		editPanelAreaId = areaId;
-		// Highlight the selected area layer
+		// Deselect main shape editing (zone) so vertex circles move to the area
+		deselectEditModeItem();
+		// Highlight and enable vertex editing on the selected area layer
 		const layer = areaLayerMap.get(areaId);
 		if (layer) {
 			layer.setStyle({ weight: 3, dashArray: '6 4', color: '#facc15' });
+			layer.pm.enable({ allowSelfIntersection: false });
+			layer.off('pm:edit');
+			layer.on('pm:edit', () => savePanelChildShape(layer, areaId, null));
 		}
 	}
 
@@ -2063,6 +2201,11 @@
 		if (editPanelSpotId) clearPanelSpot();
 		unhighlightPanelArea();
 		editPanelAreaId = '';
+		// Re-enable vertex editing on the main zone shape
+		if (editModeTarget?.type === 'zone') {
+			editModeSelection = null;
+			selectEditModeItem('shape');
+		}
 	}
 
 	function unhighlightPanelArea() {
@@ -2071,6 +2214,8 @@
 		const zone = venue.zones.find(z => z.id === editModeTarget?.zoneId);
 		const area = zone?.areas.find(a => a.id === editPanelAreaId);
 		if (layer && area) {
+			layer.off('pm:edit');
+			layer.pm.disable();
 			layer.setStyle({
 				color: area.style.stroke ?? '#cbd5e1',
 				weight: area.style.strokeWidth ?? 1,
@@ -2084,15 +2229,31 @@
 		if (editPanelSpotId && editPanelSpotId !== spotId) {
 			unhighlightPanelSpot();
 		}
-		// If coming from zone edit and no area selected yet, select the area too
-		if (editModeTarget?.type === 'zone' && !editPanelAreaId) {
+		// If a panel area is selected, disable its vertex editing first
+		if (editPanelAreaId) {
+			const areaLayer = areaLayerMap.get(editPanelAreaId);
+			if (areaLayer) {
+				areaLayer.off('pm:edit');
+				areaLayer.pm.disable();
+			}
+		}
+		// Switch to the spot's parent area
+		if (editModeTarget?.type === 'zone') {
+			if (editPanelAreaId && editPanelAreaId !== parentAreaId) {
+				unhighlightPanelArea();
+			}
 			editPanelAreaId = parentAreaId;
 		}
+		// Deselect main shape editing so vertex circles move to the spot
+		deselectEditModeItem();
 		editPanelSpotId = spotId;
 		removeSpotConfirming = false;
 		const layer = spotLayerMap.get(spotId);
 		if (layer) {
 			layer.setStyle({ weight: 3, dashArray: '6 4', color: '#facc15' });
+			layer.pm.enable({ allowSelfIntersection: false });
+			layer.off('pm:edit');
+			layer.on('pm:edit', () => savePanelChildShape(layer, parentAreaId || editPanelAreaId, spotId));
 		}
 	}
 
@@ -2101,6 +2262,19 @@
 		removeSpotConfirming = false;
 		unhighlightPanelSpot();
 		editPanelSpotId = '';
+		// Re-enable vertex editing on the parent area if selected
+		if (editPanelAreaId) {
+			const areaLayer = areaLayerMap.get(editPanelAreaId);
+			if (areaLayer) {
+				areaLayer.pm.enable({ allowSelfIntersection: false });
+				areaLayer.off('pm:edit');
+				areaLayer.on('pm:edit', () => savePanelChildShape(areaLayer, editPanelAreaId, null));
+			}
+		} else if (editModeTarget?.type === 'area') {
+			// In area edit mode, re-enable vertex editing on the main area shape
+			editModeSelection = null;
+			selectEditModeItem('shape');
+		}
 	}
 
 	function unhighlightPanelSpot() {
@@ -2113,6 +2287,8 @@
 			if (spot) break;
 		}
 		if (layer && spot) {
+			layer.off('pm:edit');
+			layer.pm.disable();
 			layer.setStyle({
 				color: spot.style.stroke ?? '#cbd5e1',
 				weight: spot.style.strokeWidth ?? 1,
@@ -3508,7 +3684,7 @@
 				}
 
 				for (const spot of area.spots) {
-					const spotLayer = shapeDefToLayer(spot.shape, spot.style, spot.name, 'spot', converter);
+					const spotLayer = shapeDefToLayer(spot.shape, spot.style, spot.name, 'spot', converter, spot.labelPosition);
 					if (spotLayer) {
 						spotLayer.addTo(map);
 						shapeLayers.push(spotLayer);
@@ -3581,7 +3757,17 @@
 				}
 			});
 		} else if (level === 'spot') {
-			layer.bindTooltip(name, { permanent: true, direction: 'top', className: 'label-spot', offset: [0, -5] });
+			const spotDir = labelPosition ? 'center' : 'top';
+			const spotOffset: [number, number] = labelPosition ? [0, 0] : [0, -5];
+			layer.bindTooltip(name, { permanent: true, direction: spotDir, className: 'label-spot', offset: spotOffset });
+			layer.on('add', function () {
+				if (labelPosition) {
+					const lp = converter
+						? converter.pixelToLatLng(labelPosition.x, labelPosition.y)
+						: { lat: labelPosition.y, lng: labelPosition.x };
+					this.getTooltip()?.setLatLng([lp.lat, lp.lng]);
+				}
+			});
 		} else {
 			layer.bindTooltip(name, { permanent: true, direction: 'center', className: `label-${level}` });
 		}
@@ -3732,14 +3918,26 @@
 				handleRelocateClick(e);
 				return;
 			}
-			if (placingLabel && editModeTarget && editModeTarget.type !== 'spot') {
+			if (placingLabel && editModeTarget) {
 				const converter = getGeoConverter();
 				const pos = converter
 					? converter.latLngToPixel(e.latlng.lat, e.latlng.lng)
 					: { x: e.latlng.lng, y: e.latlng.lat };
 				pushUndoSnapshot();
-				const entity = getEditModeEntity() as Zone | Area | undefined;
-				if (entity) entity.labelPosition = pos;
+				// Determine which entity to place label on: panelSpot > panelArea > editModeEntity
+				const zone = venue.zones.find(z => z.id === editModeTarget.zoneId);
+				let entity: Zone | Area | Spot | undefined;
+				if (editPanelSpotId) {
+					for (const a of zone?.areas ?? []) {
+						entity = a.spots.find(s => s.id === editPanelSpotId);
+						if (entity) break;
+					}
+				} else if (editPanelAreaId) {
+					entity = zone?.areas.find(a => a.id === editPanelAreaId);
+				} else {
+					entity = getEditModeEntity() as Zone | Area | undefined;
+				}
+				if (entity) (entity as any).labelPosition = pos;
 				venue = { ...venue };
 				placingLabel = false;
 				renderEditModeShapes();
@@ -4155,7 +4353,7 @@
 
 			{#if panelSpot}
 				<button class="sp-back-btn" onclick={clearPanelSpot}>
-					&#x2190; Back to {isAreaEdit ? 'Area' : panelArea ? 'Area' : 'Zone'}
+					&#x2190; Back to Area{panelSpotArea ? ` - ${panelSpotArea.name}` : ''}
 				</button>
 			{:else if isSpotEdit}
 				<button class="sp-back-btn" onclick={() => switchToEditTarget({ type: 'area', zoneId: editModeTarget.zoneId, areaId: (editModeTarget as any).areaId })}>
@@ -4182,6 +4380,20 @@
 						onfocus={pushUndoSnapshot}
 						oninput={(e) => { panelSpot.name = e.currentTarget.value.trim() || panelSpot.name; venue = { ...venue }; renderEditModeShapes(); }}
 					/>
+					<button class="sp-label-place-btn" class:active={placingLabel}
+						onclick={() => { placingLabel = !placingLabel; }}
+						title="Place label on map"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><line x1="12" y1="2" x2="12" y2="6"/><line x1="12" y1="18" x2="12" y2="22"/><line x1="2" y1="12" x2="6" y2="12"/><line x1="18" y1="12" x2="22" y2="12"/></svg> Place Label</button>
+					{#if placingLabel}
+						<span class="sp-label-hint">Click on map to place label</span>
+					{/if}
+					{#if panelSpot.labelPosition}
+						<button class="sp-label-reset" onclick={() => {
+							pushUndoSnapshot();
+							panelSpot.labelPosition = undefined;
+							venue = { ...venue };
+							renderEditModeShapes();
+						}}>Reset label position</button>
+					{/if}
 				</div>
 
 				<div class="sp-section">
@@ -4249,10 +4461,8 @@
 							<button class="zt-btn" onclick={() => removeSpotConfirming = false}>Cancel</button>
 						</div>
 					{:else}
-						<div class="sp-area-action-row">
-							<button class="zt-btn zt-btn-danger sp-area-action-btn" onclick={() => removeSpotConfirming = true}>Remove Spot</button>
-							<button class="zt-btn sp-btn-reset sp-area-action-btn" onclick={() => { const layer = spotLayerMap.get(panelSpot.id); if (layer) startRedraw(layer, panelSpot); }}>Redraw Shape</button>
-						</div>
+						<button class="zt-btn sp-btn-reset sp-area-action-btn" onclick={() => { const layer = spotLayerMap.get(panelSpot.id); if (layer) startRedraw(layer, panelSpot); }}>Redraw Shape</button>
+						<button class="zt-btn zt-btn-danger sp-area-action-btn" onclick={() => removeSpotConfirming = true}>Remove Spot</button>
 					{/if}
 				</div>
 			{:else if panelArea}
@@ -4268,6 +4478,20 @@
 							oninput={(e) => { panelArea.name = e.currentTarget.value.trim() || panelArea.name; venue = { ...venue }; renderEditModeShapes(); }}
 						/>
 					</div>
+					<button class="sp-label-place-btn" class:active={placingLabel}
+						onclick={() => { placingLabel = !placingLabel; }}
+						title="Place label on map"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><line x1="12" y1="2" x2="12" y2="6"/><line x1="12" y1="18" x2="12" y2="22"/><line x1="2" y1="12" x2="6" y2="12"/><line x1="18" y1="12" x2="22" y2="12"/></svg> Place Label</button>
+					{#if placingLabel}
+						<span class="sp-label-hint">Click on map to place label</span>
+					{/if}
+					{#if panelArea.labelPosition}
+						<button class="sp-label-reset" onclick={() => {
+							pushUndoSnapshot();
+							panelArea.labelPosition = undefined;
+							venue = { ...venue };
+							renderEditModeShapes();
+						}}>Reset label position</button>
+					{/if}
 				</div>
 
 				<div class="sp-section">
@@ -4331,6 +4555,31 @@
 				<div class="sp-section">
 					<span class="sp-section-label">Spots ({panelArea.spots.length})</span>
 					<div class="sp-spot-list">
+						{#if addingSpot}
+							<div class="sp-add-spot-form">
+								{#if addSpotDrawing}
+									<span class="sp-add-spot-hint">Draw the spot shape on the map</span>
+									<button class="zt-btn sp-add-spot-cancel" onclick={cancelAddSpot}>Cancel</button>
+								{:else}
+									<input
+										class="sp-input"
+										type="text"
+										placeholder="Spot name..."
+										bind:value={addSpotName}
+										onkeydown={(e) => { if (e.key === 'Enter' && addSpotName.trim()) startAddSpotDraw(); if (e.key === 'Escape') cancelAddSpot(); }}
+									/>
+									<div class="sp-add-spot-actions">
+										<button class="zt-btn zt-btn-primary" onclick={startAddSpotDraw} disabled={!addSpotName.trim()}>Draw</button>
+										<button class="zt-btn" onclick={cancelAddSpot}>Cancel</button>
+									</div>
+								{/if}
+							</div>
+						{:else}
+							<button class="sp-spot-card sp-spot-add-row" onclick={() => { addingSpot = true; addSpotName = ''; }}>
+								<span class="sp-spot-add-icon">+</span>
+								<span class="sp-spot-add-text">Add Spot</span>
+							</button>
+						{/if}
 						{#each panelArea.spots as spot}
 							<button class="sp-spot-card" onclick={() => selectPanelSpot(spot.id, panelArea.id)}>
 								<span class="sp-spot-dot" style="background: {CATEGORY_COLORS[spot.category]}"></span>
@@ -4341,7 +4590,7 @@
 								<span class="sp-area-arrow">&#x203A;</span>
 							</button>
 						{/each}
-						{#if panelArea.spots.length === 0}
+						{#if panelArea.spots.length === 0 && !addingSpot}
 							<span class="sp-empty">No spots</span>
 						{/if}
 					</div>
@@ -4510,6 +4759,7 @@
 					</label>
 				{/if}
 			</div>
+			{/if}
 
 			{#if isAreaEdit}
 				{@const editArea = editZone?.areas.find(a => a.id === editModeTarget.areaId)}
@@ -4617,7 +4867,6 @@
 						{/if}
 					</div>
 				</div>
-			{/if}
 			{/if}
 			{/if}
 

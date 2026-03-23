@@ -10,7 +10,8 @@
       "Bash(npx vite build:*)",
       "Bash(python3:*)",
       "Bash(lsof:*)",
-      "mcp__ide__getDiagnostics"
+      "mcp__ide__getDiagnostics",
+      "Bash(xxd:*)"
     ]
   }
 }

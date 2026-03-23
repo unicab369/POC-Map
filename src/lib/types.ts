@@ -45,6 +45,7 @@ export interface Spot {
 	category: POICategory;
 	shape: ShapeDef;
 	style: ShapeStyle;
+	labelPosition?: { x: number; y: number };
 }
 
 export interface GeoBounds {
