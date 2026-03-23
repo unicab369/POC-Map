@@ -103,6 +103,9 @@
 	let addAreaName = $state('');
 	let addAreaDrawing = $state(false);
 
+	// Sub-editing: when editing a zone, drill into an area without changing the canvas
+	let editPanelAreaId = $state<string>('');
+
 	// Relocate zone state
 	let relocatingZoneId = $state<string>('');
 
@@ -1493,6 +1496,7 @@
 					zoneClickedFlag = true;
 					setTimeout(() => zoneClickedFlag = false, 0);
 					if (editingTarget) deselectEntity(); // deselect any selected area/spot
+					if (editPanelAreaId) clearPanelArea(); // back to Edit Zone
 					selectEditModeItem('shape');
 				});
 			}
@@ -1508,11 +1512,9 @@
 						zoneClickedFlag = true;
 						setTimeout(() => zoneClickedFlag = false, 0);
 						deselectEditModeItem(); // deselect zone shape toolbox
-						if (editingTarget?.type === 'area' && editingTarget.areaId === area.id) {
-							deselectEntity();
-						} else {
-							selectEntityForToolbar({ type: 'area', zoneId: zone.id, areaId: area.id }, areaLayer);
-						}
+						if (editingTarget) deselectEntity();
+						// Show Edit Area in sidebar without changing the canvas
+						selectPanelArea(area.id);
 					};
 
 					// Leaflet click handler for area selection
@@ -1601,10 +1603,7 @@
 									isDragging = false;
 									const areaId = area.id;
 									renderEditModeShapes();
-									const newAreaLayer = areaLayerMap.get(areaId);
-									if (newAreaLayer) {
-										selectEntityForToolbar({ type: 'area', zoneId: zone.id, areaId: areaId }, newAreaLayer);
-									}
+									selectPanelArea(areaId);
 								}
 								setTimeout(() => { zoneClickedFlag = false; }, 300);
 							};
@@ -1686,6 +1685,14 @@
 					setTimeout(() => zoneClickedFlag = false, 0);
 					selectEditModeItem('shape');
 				});
+			}
+		}
+
+		// Re-apply highlight on the selected panel area after re-render
+		if (editPanelAreaId) {
+			const layer = areaLayerMap.get(editPanelAreaId);
+			if (layer) {
+				layer.setStyle({ weight: 3, dashArray: '6 4', color: '#facc15' });
 			}
 		}
 	}
@@ -1845,7 +1852,10 @@
 		addAreaDrawing = false;
 		redrawUndoneVertices = [];
 		redrawVertexCount = 0;
+
+		// Show the newly created area in the sidebar, re-render to show it on canvas
 		renderEditModeShapes();
+		selectPanelArea(area.id);
 	}
 
 	function exitEditMode(save = true) {
@@ -1884,6 +1894,7 @@
 		editModeLayer = null;
 		editModeOriginalShapes = null;
 		editModeOriginalEntity = null;
+		editPanelAreaId = '';
 		oneditchange(null);
 
 		// Re-add tile layer and floor background
@@ -1914,6 +1925,39 @@
 	function switchToEditTarget(target: EditingTarget) {
 		exitEditMode(true);
 		enterEditModeForTarget(target);
+	}
+
+	/** Show area details in sidebar without changing the canvas (zone stays rendered) */
+	function selectPanelArea(areaId: string) {
+		// Unhighlight previous
+		if (editPanelAreaId && editPanelAreaId !== areaId) {
+			unhighlightPanelArea();
+		}
+		editPanelAreaId = areaId;
+		// Highlight the selected area layer
+		const layer = areaLayerMap.get(areaId);
+		if (layer) {
+			layer.setStyle({ weight: 3, dashArray: '6 4', color: '#facc15' });
+		}
+	}
+
+	function clearPanelArea() {
+		unhighlightPanelArea();
+		editPanelAreaId = '';
+	}
+
+	function unhighlightPanelArea() {
+		if (!editPanelAreaId) return;
+		const layer = areaLayerMap.get(editPanelAreaId);
+		const zone = venue.zones.find(z => z.id === editModeTarget?.zoneId);
+		const area = zone?.areas.find(a => a.id === editPanelAreaId);
+		if (layer && area) {
+			layer.setStyle({
+				color: area.style.stroke ?? '#cbd5e1',
+				weight: area.style.strokeWidth ?? 1,
+				dashArray: ''
+			});
+		}
 	}
 
 	// Side panel handlers (work for both zone and area editing)
@@ -3508,6 +3552,7 @@
 				if (redrawActive || addSpotDrawing || addAreaDrawing) return; // don't select anything during draw
 				// Deselect area/spot toolbar if active
 				if (editingTarget) deselectEntity();
+				if (editPanelAreaId) clearPanelArea(); // back to Edit Zone
 				// If click is within overlay bounds, select overlay
 				if (overlayLayer && overlayLayer.getBounds().contains(e.latlng) && editModeSelection !== 'overlay') {
 					selectEditModeItem('overlay');
@@ -3973,13 +4018,15 @@
 		{@const isAreaEdit = editModeTarget.type === 'area'}
 		{@const isSpotEdit = editModeTarget.type === 'spot'}
 		{@const editZone = venue.zones.find(z => z.id === editModeTarget.zoneId)}
+		{@const panelArea = (editModeTarget.type === 'zone' && editPanelAreaId) ? editZone?.areas.find(a => a.id === editPanelAreaId) : null}
+		{@const showingArea = isAreaEdit || !!panelArea}
 		{#if editEntity}
 		<!-- svelte-ignore a11y_no_static_element_interactions -->
 		<!-- svelte-ignore a11y_click_events_have_key_events -->
 		<div class="side-panel" class:redraw-active={redrawActive} onclick={(e) => e.stopPropagation()}>
 			<div class="sp-header">
 				<div class="sp-header-balance"></div>
-				<span class="sp-title">Edit {isSpotEdit ? 'Spot' : isAreaEdit ? 'Area' : 'Zone'}</span>
+				<span class="sp-title">Edit {isSpotEdit ? 'Spot' : showingArea ? 'Area' : 'Zone'}</span>
 				<button class="sp-close" onclick={discardEditMode} title="Discard changes">&#x2715;</button>
 			</div>
 
@@ -3989,8 +4036,93 @@
 				<button class="sp-back-btn" onclick={() => switchToEditTarget({ type: 'area', zoneId: editModeTarget.zoneId, areaId: (editModeTarget as any).areaId })}>
 					&#x2190; Back to Area
 				</button>
+			{:else if panelArea}
+				<button class="sp-back-btn" onclick={clearPanelArea}>
+					&#x2190; Back to Zone
+				</button>
+			{:else if isAreaEdit}
+				<button class="sp-back-btn" onclick={() => switchToEditTarget({ type: 'zone', zoneId: editModeTarget.zoneId })}>
+					&#x2190; Back to Zone
+				</button>
 			{/if}
 
+			{#if panelArea}
+				<!-- Area sub-panel (zone canvas stays) -->
+				<div class="sp-section">
+					<span class="sp-section-label">Area Name</span>
+					<div class="sp-name-row">
+						<input
+							class="sp-input"
+							type="text"
+							value={panelArea.name}
+							oninput={(e) => { panelArea.name = e.currentTarget.value.trim() || panelArea.name; venue = { ...venue }; renderEditModeShapes(); }}
+						/>
+					</div>
+				</div>
+
+				<div class="sp-section">
+					<span class="sp-section-label">Category</span>
+					<select class="sp-select" value={panelArea.category} onchange={(e) => { panelArea.category = e.currentTarget.value as POICategory; panelArea.style = defaultStyle('area', panelArea.category); venue = { ...venue }; renderEditModeShapes(); }}>
+						{#each categories as cat}
+							<option value={cat}>{cat}</option>
+						{/each}
+					</select>
+				</div>
+
+				<div class="sp-section sp-section-area-style">
+					<span class="sp-section-label">Fill</span>
+					<div class="sp-swatches">
+						{#each colorSwatches as c}
+							<button
+								class="zt-swatch"
+								class:active={panelArea.style.fill === c}
+								style="background: {c}"
+								title={c}
+								onclick={() => { panelArea.style.fill = c; venue = { ...venue }; renderEditModeShapes(); }}
+							></button>
+						{/each}
+						<input type="color" class="zt-color-input" value={panelArea.style.fill} oninput={(e) => { panelArea.style.fill = e.currentTarget.value; venue = { ...venue }; renderEditModeShapes(); }} />
+					</div>
+					<div class="sp-style-row">
+						<span class="sp-style-label">Opacity</span>
+						<input type="range" class="zt-range sp-range-full" min="0.1" max="1" step="0.05" value={panelArea.style.opacity ?? 0.85} oninput={(e) => { panelArea.style.opacity = parseFloat(e.currentTarget.value); venue = { ...venue }; renderEditModeShapes(); }} />
+						<span class="zt-range-val">{(panelArea.style.opacity ?? 0.85).toFixed(2)}</span>
+					</div>
+					<div class="sp-style-row">
+						<span class="sp-style-label">Stroke</span>
+						<div class="sp-swatches">
+							{#each strokeSwatches as c}
+								<button
+									class="zt-swatch"
+									class:active={(panelArea.style.stroke ?? '#cbd5e1') === c}
+									style="background: {c}"
+									title={c}
+									onclick={() => { panelArea.style.stroke = c; venue = { ...venue }; renderEditModeShapes(); }}
+								></button>
+							{/each}
+							<input type="color" class="zt-color-input" value={panelArea.style.stroke ?? '#cbd5e1'} oninput={(e) => { panelArea.style.stroke = e.currentTarget.value; venue = { ...venue }; renderEditModeShapes(); }} />
+						</div>
+					</div>
+				</div>
+
+				<div class="sp-section">
+					<span class="sp-section-label">Spots ({panelArea.spots.length})</span>
+					<div class="sp-spot-list">
+						{#each panelArea.spots as spot}
+							<div class="sp-spot-card">
+								<span class="sp-spot-dot" style="background: {CATEGORY_COLORS[spot.category]}"></span>
+								<div class="sp-spot-info">
+									<span class="sp-spot-name">{spot.name}</span>
+									<span class="sp-spot-cat">{spot.category}</span>
+								</div>
+							</div>
+						{/each}
+						{#if panelArea.spots.length === 0}
+							<span class="sp-empty">No spots</span>
+						{/if}
+					</div>
+				</div>
+			{:else}
 			<div class="sp-section">
 				<span class="sp-section-label">{isSpotEdit ? 'Spot' : isAreaEdit ? 'Area' : 'Zone'} Name</span>
 				{#if !isSpotEdit}
@@ -4158,17 +4290,21 @@
 							</button>
 						{/if}
 						{#each editZone.areas as area}
-							<div class="sp-area-item">
-								<span class="sp-cat-dot" style="background: {CATEGORY_COLORS[area.category]}"></span>
-								<span class="sp-area-name">{area.name}</span>
-								<span class="sp-area-cat">{area.category}</span>
-							</div>
+							<button class="sp-spot-card" onclick={() => selectPanelArea(area.id)}>
+								<span class="sp-spot-dot" style="background: {CATEGORY_COLORS[area.category]}"></span>
+								<div class="sp-spot-info">
+									<span class="sp-spot-name">{area.name}</span>
+									<span class="sp-spot-cat">{area.category}</span>
+								</div>
+								<span class="sp-area-arrow">&#x203A;</span>
+							</button>
 						{/each}
 						{#if editZone.areas.length === 0 && !addingArea}
 							<span class="sp-empty">No areas</span>
 						{/if}
 					</div>
 				</div>
+			{/if}
 			{/if}
 
 			</div>
@@ -4422,6 +4558,10 @@
 		display: flex;
 		flex-direction: column;
 		gap: 8px;
+	}
+
+	.sp-section-area-style {
+		gap: 12px;
 	}
 
 	.sp-section-label {
