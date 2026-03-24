@@ -143,6 +143,7 @@
 
 	// Selected vertex state (for delete button)
 	let selectedVertexMarker = $state<any>(null);
+	let selectedVertexLayer = $state<any>(null);
 
 	// Image overlay state
 	let overlayImageUrl = $state('');
@@ -494,6 +495,9 @@
 			}
 			for (const spot of area.spots) {
 				spot.shape = applyDelta(spot.shape, dx, dy);
+				if (spot.labelPosition) {
+					spot.labelPosition = { x: spot.labelPosition.x + dx, y: spot.labelPosition.y + dy };
+				}
 			}
 		}
 
@@ -724,12 +728,9 @@
 			addOverlayToMap(savedOverlay.bounds);
 		}
 
-		// Invalidate map size since the container changed, then fit
+		// Invalidate map size since the container changed
 		setTimeout(() => {
 			map?.invalidateSize();
-			if (editModeLayer) {
-				map.fitBounds(editModeLayer.getBounds().pad(0.2));
-			}
 			// Auto-enable vertex editing on the main shape
 			selectEditModeItem('shape');
 		}, 50);
@@ -749,7 +750,7 @@
 				if (p && shapeRotateMarker) shapeRotateMarker.setLatLng(p);
 				repositionShapeEdgeMarkers();
 				saveEditModeShapesToData();
-				selectedVertexMarker = null;
+				selectedVertexMarker = null; selectedVertexLayer = null;
 				hookVertexMarkerClicks();
 			});
 
@@ -766,25 +767,29 @@
 
 	// ── Vertex selection (for delete button) ──
 
-	function hookVertexMarkerClicks() {
-		if (!editModeLayer) return;
+	function hookVertexMarkerClicks(layer?: any) {
+		const target = layer ?? editModeLayer;
+		if (!target) return;
 		selectedVertexMarker = null;
+		selectedVertexLayer = null;
 		// Geoman stores vertex markers in layer.pm._markers (array of rings, each an array of markers)
-		const markerGroups = editModeLayer.pm?._markers;
+		const markerGroups = target.pm?._markers;
 		if (!markerGroups) return;
 		const markers = Array.isArray(markerGroups[0]) ? markerGroups[0] : markerGroups;
 		for (const m of markers) {
 			if (!m || !m.on) continue;
 			m.on('click', () => {
 				selectedVertexMarker = m;
-				highlightSelectedVertex(m);
+				selectedVertexLayer = target;
+				highlightSelectedVertex(m, target);
 			});
 		}
 	}
 
-	function highlightSelectedVertex(marker: any) {
+	function highlightSelectedVertex(marker: any, layer?: any) {
+		const target = layer ?? selectedVertexLayer ?? editModeLayer;
 		// Reset all vertex marker styles, highlight the selected one
-		const markerGroups = editModeLayer?.pm?._markers;
+		const markerGroups = target?.pm?._markers;
 		if (!markerGroups) return;
 		const markers = Array.isArray(markerGroups[0]) ? markerGroups[0] : markerGroups;
 		for (const m of markers) {
@@ -796,34 +801,46 @@
 	}
 
 	function deleteSelectedVertex() {
-		if (!selectedVertexMarker || !editModeLayer) return;
-		const latlngs = editModeLayer.getLatLngs()[0];
+		const target = selectedVertexLayer ?? editModeLayer;
+		if (!selectedVertexMarker || !target) return;
+		const latlngs = target.getLatLngs()[0];
 		if (!latlngs || latlngs.length <= 3) return; // need at least 3 vertices for a polygon
 
 		// Find the index of the selected vertex
-		const markerGroups = editModeLayer.pm._markers;
+		const markerGroups = target.pm._markers;
 		const markers = Array.isArray(markerGroups[0]) ? markerGroups[0] : markerGroups;
 		const idx = markers.indexOf(selectedVertexMarker);
 		if (idx === -1) return;
 
+		pushUndoSnapshot();
+
 		// Remove the vertex
 		latlngs.splice(idx, 1);
-		editModeLayer.setLatLngs([latlngs]);
+		target.setLatLngs([latlngs]);
 
 		// Re-enable pm to refresh vertex markers
-		editModeLayer.pm.disable();
-		editModeLayer.pm.enable({ allowSelfIntersection: false });
+		target.pm.disable();
+		target.pm.enable({ allowSelfIntersection: false });
 
 		selectedVertexMarker = null;
 
 		// Re-hook vertex clicks on new markers
-		hookVertexMarkerClicks();
+		hookVertexMarkerClicks(target);
 
-		// Update handles + save
-		const p = getShapeRotateHandlePos();
-		if (p && shapeRotateMarker) shapeRotateMarker.setLatLng(p);
-		repositionShapeEdgeMarkers();
-		saveEditModeShapesToData();
+		// Save changes
+		if (target === editModeLayer) {
+			const p = getShapeRotateHandlePos();
+			if (p && shapeRotateMarker) shapeRotateMarker.setLatLng(p);
+			repositionShapeEdgeMarkers();
+			saveEditModeShapesToData();
+		} else {
+			// Save for panel child (area or spot)
+			if (editPanelSpotId) {
+				savePanelChildShape(target, editPanelAreaId, editPanelSpotId);
+			} else if (editPanelAreaId) {
+				savePanelChildShape(target, editPanelAreaId, null);
+			}
+		}
 	}
 
 	// ── Shape drag via direct DOM handler on SVG _path element ──
@@ -919,7 +936,7 @@
 					requestAnimationFrame(() => setupShapeDragOnPath());
 					hookVertexMarkerClicks();
 				}
-				selectedVertexMarker = null;
+				selectedVertexMarker = null; selectedVertexLayer = null;
 				const p = getShapeRotateHandlePos();
 				if (p && shapeRotateMarker) shapeRotateMarker.setLatLng(p);
 				repositionShapeEdgeMarkers();
@@ -1141,7 +1158,7 @@
 			editModeLayer.pm.enable({ allowSelfIntersection: false });
 			// Re-attach shape drag handler since _path may have changed
 			requestAnimationFrame(() => setupShapeDragOnPath());
-			selectedVertexMarker = null;
+			selectedVertexMarker = null; selectedVertexLayer = null;
 			hookVertexMarkerClicks();
 			const p = getShapeRotateHandlePos();
 			if (p && shapeRotateMarker) shapeRotateMarker.setLatLng(p);
@@ -1654,6 +1671,7 @@
 					const s = a?.spots.find(sp => sp.id === spot.id);
 					if (s) {
 						s.shape = applyDelta(s.shape, dx, dy);
+						if (s.labelPosition) s.labelPosition = { x: s.labelPosition.x + dx, y: s.labelPosition.y + dy };
 					}
 					venue = { ...venue };
 					isDragging = false;
@@ -1809,6 +1827,7 @@
 										if (a.labelPosition) a.labelPosition = { x: a.labelPosition.x + dx, y: a.labelPosition.y + dy };
 										for (const s of a.spots) {
 											s.shape = applyDelta(s.shape, dx, dy);
+											if (s.labelPosition) s.labelPosition = { x: s.labelPosition.x + dx, y: s.labelPosition.y + dy };
 										}
 									}
 									venue = { ...venue };
@@ -1959,12 +1978,64 @@
 		exitEditMode(false);
 	}
 
+	/** Disable pm vertex editing on all child layers (areas + spots) while drawing */
+	function disableAllChildPm() {
+		for (const layer of areaLayerMap.values()) {
+			try { layer.pm.disable(); } catch (_) {}
+		}
+		for (const layer of spotLayerMap.values()) {
+			try { layer.pm.disable(); } catch (_) {}
+		}
+		if (editModeLayer) {
+			try { editModeLayer.pm.disable(); } catch (_) {}
+		}
+	}
+
+	/** Re-enable pm vertex editing on the currently selected panel entity after drawing */
+	function restoreChildPm() {
+		if (editPanelSpotId) {
+			const layer = spotLayerMap.get(editPanelSpotId);
+			if (layer) {
+				layer.pm.enable({ allowSelfIntersection: false });
+				layer.off('pm:edit');
+				const areaId = editPanelAreaId;
+				const spotId = editPanelSpotId;
+				layer.on('pm:edit', () => {
+					savePanelChildShape(layer, areaId, spotId);
+					selectedVertexMarker = null; selectedVertexLayer = null;
+					selectedVertexLayer = null;
+					hookVertexMarkerClicks(layer);
+				});
+				hookVertexMarkerClicks(layer);
+			}
+		} else if (editPanelAreaId) {
+			const layer = areaLayerMap.get(editPanelAreaId);
+			if (layer) {
+				layer.pm.enable({ allowSelfIntersection: false });
+				layer.off('pm:edit');
+				const areaId = editPanelAreaId;
+				layer.on('pm:edit', () => {
+					savePanelChildShape(layer, areaId, null);
+					selectedVertexMarker = null; selectedVertexLayer = null;
+					selectedVertexLayer = null;
+					hookVertexMarkerClicks(layer);
+				});
+				hookVertexMarkerClicks(layer);
+			}
+		} else {
+			editModeSelection = null;
+			selectEditModeItem('shape');
+		}
+	}
+
 	function startAddSpotDraw() {
 		if (!map || !addSpotName.trim()) return;
 		addSpotDrawing = true;
 		redrawUndoneVertices = [];
 		redrawVertexCount = 0;
 		deselectEditModeItem();
+		// Disable vertex editing on area/spot layers so they can't be moved while drawing
+		disableAllChildPm();
 		map.pm.enableDraw('Polygon', {
 			pathOptions: {
 				color: '#cbd5e1',
@@ -1974,6 +2045,7 @@
 			}
 		});
 		map.on('pm:vertexadded', onRedrawVertexAdded);
+		enableDrawSnap();
 	}
 
 	function cancelAddSpot() {
@@ -1985,6 +2057,8 @@
 			addSpotDrawing = false;
 			redrawUndoneVertices = [];
 			redrawVertexCount = 0;
+			restoreChildPm();
+			disableDrawSnap();
 		}
 	}
 
@@ -2017,12 +2091,17 @@
 		// Remove the drawn layer (we re-render from data)
 		map.removeLayer(layer);
 		map.off('pm:vertexadded', onRedrawVertexAdded);
+		disableDrawSnap();
 		addingSpot = false;
 		addSpotName = '';
 		addSpotDrawing = false;
 		redrawUndoneVertices = [];
 		redrawVertexCount = 0;
 		renderEditModeShapes();
+		restoreChildPm();
+
+		// Auto-select the new spot for editing
+		selectPanelSpot(spot.id, areaId!);
 	}
 
 	function startAddAreaDraw() {
@@ -2031,6 +2110,7 @@
 		redrawUndoneVertices = [];
 		redrawVertexCount = 0;
 		deselectEditModeItem();
+		disableAllChildPm();
 		map.pm.enableDraw('Polygon', {
 			pathOptions: {
 				color: '#cbd5e1',
@@ -2040,6 +2120,7 @@
 			}
 		});
 		map.on('pm:vertexadded', onRedrawVertexAdded);
+		enableDrawSnap();
 	}
 
 	function cancelAddArea() {
@@ -2051,6 +2132,8 @@
 			addAreaDrawing = false;
 			redrawUndoneVertices = [];
 			redrawVertexCount = 0;
+			restoreChildPm();
+			disableDrawSnap();
 		}
 	}
 
@@ -2078,6 +2161,7 @@
 
 		map.removeLayer(layer);
 		map.off('pm:vertexadded', onRedrawVertexAdded);
+		disableDrawSnap();
 		addingArea = false;
 		addAreaName = '';
 		addAreaDrawing = false;
@@ -2199,7 +2283,13 @@
 			layer.setStyle({ weight: 3, dashArray: '6 4', color: '#facc15' });
 			layer.pm.enable({ allowSelfIntersection: false });
 			layer.off('pm:edit');
-			layer.on('pm:edit', () => savePanelChildShape(layer, areaId, null));
+			layer.on('pm:edit', () => {
+				savePanelChildShape(layer, areaId, null);
+				selectedVertexMarker = null; selectedVertexLayer = null;
+				selectedVertexLayer = null;
+				hookVertexMarkerClicks(layer);
+			});
+			hookVertexMarkerClicks(layer);
 		}
 	}
 
@@ -2260,7 +2350,13 @@
 			layer.setStyle({ weight: 3, dashArray: '6 4', color: '#facc15' });
 			layer.pm.enable({ allowSelfIntersection: false });
 			layer.off('pm:edit');
-			layer.on('pm:edit', () => savePanelChildShape(layer, parentAreaId || editPanelAreaId, spotId));
+			layer.on('pm:edit', () => {
+				savePanelChildShape(layer, parentAreaId || editPanelAreaId, spotId);
+				selectedVertexMarker = null; selectedVertexLayer = null;
+				selectedVertexLayer = null;
+				hookVertexMarkerClicks(layer);
+			});
+			hookVertexMarkerClicks(layer);
 		}
 	}
 
@@ -2441,6 +2537,55 @@
 		}
 	}
 
+	/** Snap the draw-mode hint marker to the first vertex when cursor is near it */
+	const SNAP_THRESHOLD_PX = 20;
+	let snapIndicator: any = null;
+
+	function onDrawMouseMove(e: any) {
+		if (!map) return;
+		const drawMode = map.pm?.Draw?.Polygon;
+		if (!drawMode?._markers || drawMode._markers.length < 2) {
+			removeSnapIndicator();
+			return;
+		}
+		const L = (window as any).L;
+		const firstLL = drawMode._markers[0].getLatLng();
+		const firstPt = map.latLngToContainerPoint(firstLL);
+		const cursorPt = map.latLngToContainerPoint(e.latlng);
+		const dist = Math.sqrt(Math.pow(firstPt.x - cursorPt.x, 2) + Math.pow(firstPt.y - cursorPt.y, 2));
+
+		if (dist < SNAP_THRESHOLD_PX) {
+			// Snap the hint marker to the first vertex
+			if (drawMode._hintMarker) {
+				drawMode._hintMarker.setLatLng(firstLL);
+			}
+			// Show snap indicator ring
+			if (!snapIndicator) {
+				snapIndicator = L.circleMarker(firstLL, {
+					radius: 8, color: '#facc15', weight: 2, fillColor: '#facc15', fillOpacity: 0.3, interactive: false
+				}).addTo(map);
+			}
+		} else {
+			removeSnapIndicator();
+		}
+	}
+
+	function removeSnapIndicator() {
+		if (snapIndicator) {
+			snapIndicator.remove();
+			snapIndicator = null;
+		}
+	}
+
+	function enableDrawSnap() {
+		map?.on('mousemove', onDrawMouseMove);
+	}
+
+	function disableDrawSnap() {
+		map?.off('mousemove', onDrawMouseMove);
+		removeSnapIndicator();
+	}
+
 	// Collect all current draw-mode vertex latlngs
 	function getRedrawVertices(): Array<{ lat: number; lng: number }> {
 		const drawMode = map?.pm?.Draw?.Polygon;
@@ -2530,6 +2675,7 @@
 
 		// Deselect current edit-mode selection (disables pm / removes overlay handles)
 		deselectEditModeItem();
+		disableAllChildPm();
 
 		// Track in-place entity if different from editModeEntity
 		redrawEntity = targetEntity ?? null;
@@ -2556,6 +2702,7 @@
 
 		// Allow dragging already-placed vertices during draw
 		map.on('pm:vertexadded', onRedrawVertexAdded);
+		enableDrawSnap();
 
 		redrawUndoneVertices = [];
 		redrawVertexCount = 0;
@@ -2570,6 +2717,7 @@
 		// Stop drawing
 		map.pm.disableDraw();
 		map.off('pm:vertexadded', onRedrawVertexAdded);
+		disableDrawSnap();
 
 		// Re-add original layer to the map
 		if (redrawOriginalLayer) {
@@ -2591,14 +2739,7 @@
 		redrawEntity = null;
 
 		if (inPlace) {
-			// Re-highlight the panel spot/area
-			if (editPanelSpotId) {
-				const layer = spotLayerMap.get(editPanelSpotId);
-				if (layer) layer.setStyle({ weight: 3, dashArray: '6 4', color: '#facc15' });
-			} else if (editPanelAreaId) {
-				const layer = areaLayerMap.get(editPanelAreaId);
-				if (layer) layer.setStyle({ weight: 3, dashArray: '6 4', color: '#facc15' });
-			}
+			restoreChildPm();
 		} else {
 			// Re-select shape so vertex editing is restored
 			editModeSelection = null;
@@ -2609,6 +2750,7 @@
 	function completeRedraw(newLayer: any) {
 		if (!map || !editModeTarget) return;
 		map.off('pm:vertexadded', onRedrawVertexAdded);
+		disableDrawSnap();
 
 		const inPlace = !!redrawEntity;
 
@@ -2639,6 +2781,10 @@
 
 		// Rebuild with new shape (re-enables vertex editing)
 		renderEditModeShapes();
+
+		if (inPlace) {
+			restoreChildPm();
+		}
 
 		if (!inPlace) {
 			// Fit bounds to new shape
@@ -3498,6 +3644,9 @@
 				}
 				for (const spot of area.spots) {
 					spot.shape = applyDelta(spot.shape, delta.dx, delta.dy);
+					if (spot.labelPosition) {
+						spot.labelPosition = { x: spot.labelPosition.x + delta.dx, y: spot.labelPosition.y + delta.dy };
+					}
 				}
 			}
 		}
@@ -4001,6 +4150,13 @@
 			if (redrawActive) return;
 			if (editingTarget) deselectEntity();
 			if (editingZoneId) deselectZone();
+			// Enable snap-to-first-vertex for non-edit-mode drawing
+			if (!isDrawingPolygon) enableDrawSnap();
+		});
+
+		// Auto-close polygon when last vertex is near the first (non-edit-mode drawing)
+		map.on('pm:vertexadded', () => {
+			if (!isDrawingPolygon) checkAutoClosePolygon();
 		});
 
 		// Safety net: if draw ends without creating a shape during redraw, cancel
@@ -4009,6 +4165,7 @@
 			if (redrawActive) cancelRedraw();
 			if (addSpotDrawing) { addSpotDrawing = false; }
 			if (addAreaDrawing) { addAreaDrawing = false; }
+			disableDrawSnap();
 		});
 
 		renderExistingShapes();
