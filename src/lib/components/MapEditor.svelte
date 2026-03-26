@@ -101,6 +101,7 @@
 	// Label placement state
 	let placingLabel = $state(false);
 	let labelMarkers: any[] = []; // draggable label markers in edit mode
+	let labelMarkerMap = new Map<string, any>(); // entityId → label marker for drag sync
 
 	// Add-spot-in-edit-mode state
 	let addingSpot = $state(false);
@@ -157,6 +158,50 @@
 	let overlayDragHandlers: { mousedown: any; mousemove: any; mouseup: any } | null = null;
 	let overlayEdgeMarkers: any[] = [];
 	let shapeEdgeMarkers: any[] = [];
+
+	// Spot label zoom visibility
+	let spotLabelBaseZoom = 0;
+	const SPOT_LABEL_ZOOM_OFFSET = 2;
+	let labelScreenThreshold = $state(40); // px — hide label if shape < this on screen
+
+	function getLayerScreenSize(layer: any): { w: number; h: number } {
+		if (!map || !layer.getBounds) return { w: Infinity, h: Infinity };
+		const bounds = layer.getBounds();
+		const ne = map.latLngToContainerPoint(bounds.getNorthEast());
+		const sw = map.latLngToContainerPoint(bounds.getSouthWest());
+		return { w: Math.abs(ne.x - sw.x), h: Math.abs(ne.y - sw.y) };
+	}
+
+	function updateLabelVisibility() {
+		if (!map || !mapContainer) return;
+
+		if (editMode) {
+			mapContainer.classList.remove('hide-spot-labels');
+		} else {
+			// Coarse zoom check (cheap CSS toggle — hides ALL spot labels when very zoomed out)
+			const showSpots = map.getZoom() >= spotLabelBaseZoom + SPOT_LABEL_ZOOM_OFFSET;
+			mapContainer.classList.toggle('hide-spot-labels', !showSpots);
+			if (!showSpots) return; // all hidden, skip per-shape work
+		}
+
+		// Per-shape screen-size check for spots
+		for (const [id, layer] of spotLayerMap) {
+			const { w, h } = getLayerScreenSize(layer);
+			const hide = w < labelScreenThreshold || h < labelScreenThreshold;
+			const el = layer.getTooltip()?.getElement();
+			if (el) el.style.display = hide ? 'none' : '';
+			const m = labelMarkerMap.get(id)?.getElement?.();
+			if (m) m.style.display = hide ? 'none' : '';
+		}
+
+		// Areas: always show labels (no threshold)
+		for (const [id, layer] of areaLayerMap) {
+			const el = layer.getTooltip()?.getElement();
+			if (el) el.style.display = '';
+			const m = labelMarkerMap.get(id)?.getElement?.();
+			if (m) m.style.display = '';
+		}
+	}
 
 	// Side panel live editing state
 	let panelName = $state('');
@@ -680,6 +725,7 @@
 
 		editModeTarget = target;
 		editMode = true;
+		updateLabelVisibility();
 		oneditchange(target);
 
 		// Snapshot original shapes for reset
@@ -863,6 +909,8 @@
 			let startLatLng: any = null;
 			let startLatlngs: any = null;
 			let startChildLatlngs: any[] = [];
+			let startLabelPositions: { marker: any; lat: number; lng: number }[] = [];
+			let startTooltipPositions: { tooltip: any; lat: number; lng: number }[] = [];
 
 			const onPathDown = (e: any) => {
 				if (!editModeLayer || editModeSelection !== 'shape') return;
@@ -890,6 +938,20 @@
 						if (typeof sl.getLatLngs === 'function') return { type: 'poly', data: JSON.parse(JSON.stringify(sl.getLatLngs())) };
 						return { type: 'circle', data: JSON.parse(JSON.stringify(sl.getLatLng())) };
 					});
+				// Capture label marker and tooltip positions
+				startLabelPositions = [];
+				for (const lm of labelMarkers) {
+					const ll = lm.getLatLng();
+					startLabelPositions.push({ marker: lm, lat: ll.lat, lng: ll.lng });
+				}
+				startTooltipPositions = [];
+				for (const sl of shapeLayers) {
+					const tt = sl.getTooltip?.();
+					if (tt) {
+						const tp = tt.getLatLng();
+						if (tp) startTooltipPositions.push({ tooltip: tt, lat: tp.lat, lng: tp.lng });
+					}
+				}
 				editModeLayer.pm.disable();
 			};
 
@@ -915,6 +977,14 @@
 						childLayers[i].setLatLngs(shiftLatlngs(snap.data, dLat, dLng));
 					}
 				}
+				// Move label markers
+				for (const slp of startLabelPositions) {
+					slp.marker.setLatLng(L.latLng(slp.lat + dLat, slp.lng + dLng));
+				}
+				// Move tooltips
+				for (const stp of startTooltipPositions) {
+					stp.tooltip.setLatLng(L.latLng(stp.lat + dLat, stp.lng + dLng));
+				}
 				const p = getShapeRotateHandlePos();
 				if (p && shapeRotateMarker) shapeRotateMarker.setLatLng(p);
 				repositionShapeEdgeMarkers();
@@ -926,6 +996,8 @@
 				startLatLng = null;
 				startLatlngs = null;
 				startChildLatlngs = [];
+				startLabelPositions = [];
+				startTooltipPositions = [];
 
 				// Re-enable map dragging
 				map.dragging.enable();
@@ -1570,7 +1642,7 @@
 		shapeToolboxPanel = null;
 	}
 
-	function addDraggableLabelMarker(entity: Zone | Area | Spot, level: string, converter?: GeoConverter) {
+	function addDraggableLabelMarker(entity: Zone | Area | Spot, level: string, converter?: GeoConverter, onclick?: () => void) {
 		if (!entity.labelPosition || !map) return;
 		const L = (window as any).L;
 		const lp = converter
@@ -1585,10 +1657,19 @@
 		});
 		const marker = L.marker([lp.lat, lp.lng], { icon, draggable: true, zIndexOffset: 1000 }).addTo(map);
 		labelMarkers.push(marker);
+		labelMarkerMap.set(entity.id, marker);
 		let dragUndoPushed = false;
+		let didDrag = false;
 		marker.on('dragstart', () => {
+			didDrag = true;
 			if (!dragUndoPushed) { pushUndoSnapshot(); dragUndoPushed = true; }
 		});
+		if (onclick) {
+			marker.on('click', () => {
+				if (didDrag) { didDrag = false; return; }
+				onclick();
+			});
+		}
 		marker.on('dragend', () => {
 			const pos = marker.getLatLng();
 			entity.labelPosition = converter
@@ -1642,6 +1723,18 @@
 					} else if (spotLayer.getLatLngs) {
 						const latlngs = spotLayer.getLatLngs()[0].map((ll: any) => L.latLng(ll.lat + dlat, ll.lng + dlng));
 						spotLayer.setLatLngs(latlngs);
+					}
+					// Move spot label along
+					const spotLabelM = labelMarkerMap.get(spot.id);
+					if (spotLabelM) {
+						const lp = spotLabelM.getLatLng();
+						spotLabelM.setLatLng(L.latLng(lp.lat + dlat, lp.lng + dlng));
+					} else {
+						const spotTooltip = spotLayer.getTooltip();
+						if (spotTooltip) {
+							const tp = spotTooltip.getLatLng();
+							if (tp) spotTooltip.setLatLng(L.latLng(tp.lat + dlat, tp.lng + dlng));
+						}
 					}
 					prevLatLng = curLatLng;
 				}
@@ -1697,6 +1790,7 @@
 		// Clear existing
 		for (const lm of labelMarkers) map.removeLayer(lm);
 		labelMarkers = [];
+		labelMarkerMap = new Map();
 		for (const sl of shapeLayers) {
 			map.removeLayer(sl);
 		}
@@ -1712,16 +1806,17 @@
 				zoneLayer.addTo(map);
 				shapeLayers.push(zoneLayer);
 				editModeLayer = zoneLayer;
-				if (zone.labelPosition) { zoneLayer.unbindTooltip(); addDraggableLabelMarker(zone, 'zone', converter); }
-				zoneLayer.on('click', () => {
-					if (placingLabel) return; // don't clear panels while placing label
+				const zoneClickHandler = () => {
+					if (placingLabel) return;
 					zoneClickedFlag = true;
 					setTimeout(() => zoneClickedFlag = false, 0);
-					if (editingTarget) deselectEntity(); // deselect any selected area/spot
+					if (editingTarget) deselectEntity();
 					if (editPanelSpotId) clearPanelSpot();
-					if (editPanelAreaId) clearPanelArea(); // back to Edit Zone
+					if (editPanelAreaId) clearPanelArea();
 					selectEditModeItem('shape');
-				});
+				};
+				if (zone.labelPosition) { zoneLayer.unbindTooltip(); addDraggableLabelMarker(zone, 'zone', converter, zoneClickHandler); }
+				zoneLayer.on('click', () => zoneClickHandler());
 			}
 			for (const area of zone.areas) {
 				const areaChildLayers: any[] = [];
@@ -1730,20 +1825,19 @@
 					areaLayer.addTo(map);
 					shapeLayers.push(areaLayer);
 					areaLayerMap.set(area.id, areaLayer);
-					if (area.labelPosition) { areaLayer.unbindTooltip(); addDraggableLabelMarker(area, 'area', converter); }
 
 					const handleAreaClick = () => {
-						if (placingLabel) return; // don't change selection while placing label
+						if (placingLabel) return;
 						if (addSpotDrawing || addAreaDrawing || redrawActive) return;
-						if (spotClickedFlag) return; // spot takes priority
+						if (spotClickedFlag) return;
 						zoneClickedFlag = true;
 						setTimeout(() => zoneClickedFlag = false, 0);
-						deselectEditModeItem(); // deselect zone shape toolbox
+						deselectEditModeItem();
 						if (editingTarget) deselectEntity();
 						if (editPanelSpotId) clearPanelSpot();
-						// Show Edit Area in sidebar without changing the canvas
 						selectPanelArea(area.id);
 					};
+					if (area.labelPosition) { areaLayer.unbindTooltip(); addDraggableLabelMarker(area, 'area', converter, handleAreaClick); }
 
 					// Leaflet click handler for area selection
 					areaLayer.on('click', (e: any) => {
@@ -1796,6 +1890,25 @@
 									} else if (areaLayer.getLatLngs) {
 										const latlngs = areaLayer.getLatLngs()[0].map((ll: any) => L.latLng(ll.lat + dlat, ll.lng + dlng));
 										areaLayer.setLatLngs(latlngs);
+									}
+									// Move labels along with the area
+									const areaLabelM = labelMarkerMap.get(area.id);
+									if (areaLabelM) {
+										const lp = areaLabelM.getLatLng();
+										areaLabelM.setLatLng(L.latLng(lp.lat + dlat, lp.lng + dlng));
+									} else {
+										const areaTooltip = areaLayer.getTooltip();
+										if (areaTooltip) {
+											const tp = areaTooltip.getLatLng();
+											if (tp) areaTooltip.setLatLng(L.latLng(tp.lat + dlat, tp.lng + dlng));
+										}
+									}
+									for (const sp of area.spots) {
+										const spLabelM = labelMarkerMap.get(sp.id);
+										if (spLabelM) {
+											const lp = spLabelM.getLatLng();
+											spLabelM.setLatLng(L.latLng(lp.lat + dlat, lp.lng + dlng));
+										}
 									}
 									prevLatLng = curLatLng;
 								}
@@ -1854,7 +1967,7 @@
 						spotLayerMap.set(spot.id, spotLayer);
 
 						spotLayer.on('click', (e: any) => {
-							if (placingLabel) return; // don't change selection while placing label
+							if (placingLabel || addSpotDrawing || addAreaDrawing || redrawActive) return;
 							if (e.originalEvent) e.originalEvent.stopPropagation();
 							spotClickedFlag = true;
 							zoneClickedFlag = true;
@@ -1866,7 +1979,19 @@
 						});
 
 						attachSpotDrag(spotLayer, spot, area.id, zone.id);
-						if (spot.labelPosition) { spotLayer.unbindTooltip(); addDraggableLabelMarker(spot, 'spot', converter); }
+						if (spot.labelPosition) {
+							spotLayer.unbindTooltip();
+							addDraggableLabelMarker(spot, 'spot', converter, () => {
+								if (placingLabel || addSpotDrawing || addAreaDrawing || redrawActive) return;
+								spotClickedFlag = true;
+								zoneClickedFlag = true;
+								setTimeout(() => { spotClickedFlag = false; zoneClickedFlag = false; }, 0);
+								if (editingTarget) deselectEntity();
+								deselectEditModeItem();
+								if (editPanelAreaId) unhighlightPanelArea();
+								selectPanelSpot(spot.id, area.id);
+							});
+						}
 					}
 				}
 			}
@@ -1879,13 +2004,14 @@
 				areaLayer.addTo(map);
 				shapeLayers.push(areaLayer);
 				editModeLayer = areaLayer;
-				if (area.labelPosition) { areaLayer.unbindTooltip(); addDraggableLabelMarker(area, 'area', converter); }
-				areaLayer.on('click', () => {
+				const areaEditClickHandler = () => {
 					zoneClickedFlag = true;
 					setTimeout(() => zoneClickedFlag = false, 0);
 					if (editPanelSpotId) clearPanelSpot();
 					selectEditModeItem('shape');
-				});
+				};
+				if (area.labelPosition) { areaLayer.unbindTooltip(); addDraggableLabelMarker(area, 'area', converter, areaEditClickHandler); }
+				areaLayer.on('click', () => areaEditClickHandler());
 			}
 			for (const spot of area.spots) {
 				const spotLayer = shapeDefToLayer(spot.shape, spot.style, spot.name, 'spot', converter, spot.labelPosition);
@@ -1894,6 +2020,7 @@
 					shapeLayers.push(spotLayer);
 					spotLayerMap.set(spot.id, spotLayer);
 					spotLayer.on('click', () => {
+						if (addSpotDrawing || addAreaDrawing || redrawActive) return;
 						zoneClickedFlag = true;
 						setTimeout(() => zoneClickedFlag = false, 0);
 						deselectEditModeItem();
@@ -1901,7 +2028,16 @@
 					});
 
 					attachSpotDrag(spotLayer, spot, area.id, zone.id);
-					if (spot.labelPosition) { spotLayer.unbindTooltip(); addDraggableLabelMarker(spot, 'spot', converter); }
+					if (spot.labelPosition) {
+						spotLayer.unbindTooltip();
+						addDraggableLabelMarker(spot, 'spot', converter, () => {
+							if (addSpotDrawing || addAreaDrawing || redrawActive) return;
+							zoneClickedFlag = true;
+							setTimeout(() => zoneClickedFlag = false, 0);
+							deselectEditModeItem();
+							selectPanelSpot(spot.id, area.id);
+						});
+					}
 				}
 			}
 		} else if (editModeTarget.type === 'spot') {
@@ -1919,12 +2055,13 @@
 				spotLayer.addTo(map);
 				shapeLayers.push(spotLayer);
 				editModeLayer = spotLayer;
-				if (spot.labelPosition) { spotLayer.unbindTooltip(); addDraggableLabelMarker(spot, 'spot', converter); }
-				spotLayer.on('click', () => {
+				const spotEditClickHandler = () => {
 					zoneClickedFlag = true;
 					setTimeout(() => zoneClickedFlag = false, 0);
 					selectEditModeItem('shape');
-				});
+				};
+				if (spot.labelPosition) { spotLayer.unbindTooltip(); addDraggableLabelMarker(spot, 'spot', converter, spotEditClickHandler); }
+				spotLayer.on('click', () => spotEditClickHandler());
 			}
 		}
 
@@ -2179,6 +2316,7 @@
 		placingLabel = false;
 		for (const lm of labelMarkers) map?.removeLayer(lm);
 		labelMarkers = [];
+		labelMarkerMap = new Map();
 		cancelAddSpot();
 
 		// Cancel any active redraw first
@@ -2213,6 +2351,7 @@
 		editPanelAreaId = '';
 		editPanelSpotId = '';
 		removeZoneConfirming = false;
+		updateLabelVisibility();
 		oneditchange(null);
 
 		// Re-add tile layer and floor background
@@ -3858,6 +3997,7 @@
 					areaLayer.addTo(map);
 					shapeLayers.push(areaLayer);
 					zoneChildLayers.push(areaLayer);
+					areaLayerMap.set(area.id, areaLayer);
 				}
 
 				for (const spot of area.spots) {
@@ -3866,6 +4006,7 @@
 						spotLayer.addTo(map);
 						shapeLayers.push(spotLayer);
 						zoneChildLayers.push(spotLayer);
+						spotLayerMap.set(spot.id, spotLayer);
 					}
 				}
 			}
@@ -4042,6 +4183,7 @@
 			venueGeoBounds = geoBounds;
 
 			map.fitBounds(geoBounds);
+			setTimeout(() => { spotLabelBaseZoom = map.getZoom(); updateLabelVisibility(); }, 0);
 		} else {
 			// Pixel mode (fallback): Y-down CRS, no tiles
 			const YDownCRS = L.Util.extend({}, L.CRS.Simple, {
@@ -4058,6 +4200,7 @@
 			const bounds = [[0, 0], [venue.height, venue.width]];
 
 			map.fitBounds(bounds);
+			setTimeout(() => { spotLabelBaseZoom = map.getZoom(); updateLabelVisibility(); }, 0);
 
 		}
 
@@ -4143,6 +4286,7 @@
 		// Update toolbar position on map move/zoom
 		map.on('move zoom zoomend', () => {
 			if (editingTarget) updateToolbarPosition();
+			updateLabelVisibility();
 		});
 
 		// Deselect zone/area when starting to draw
@@ -4266,47 +4410,50 @@
 <svelte:window onkeydown={handleKeydown} />
 
 <div class="editor-wrapper" class:edit-mode-active={editMode}>
-	{#if !editMode}
-	<div class="editor-toolbar">
-		<div class="toolbar-row">
-			<span class="venue-name">{venue.name}</span>
-			<div class="toolbar-spacer"></div>
+	<div class="editor-main">
+	<div class="editor-top-bar">
+		<div class="editor-toolbar">
+			<div class="toolbar-row">
+				<span class="venue-name">{venue.name}</span>
+				<div class="toolbar-spacer"></div>
+			</div>
+			{#if !editMode && editingZoneId}
+			<div class="toolbar-row">
+					<span class="editing-badge">
+						Moving: {venue.zones.find(z => z.id === editingZoneId)?.name ?? ''}
+					</span>
+			</div>
+			{/if}
 		</div>
-		{#if editingZoneId}
-		<div class="toolbar-row">
-				<span class="editing-badge">
-					Moving: {venue.zones.find(z => z.id === editingZoneId)?.name ?? ''}
-				</span>
-		</div>
-		{/if}
-	</div>
 
-	<div class="zone-selector">
-		{#if !isFloorVenue}
-			<button
-				class="zone-chip"
-				class:active={activeZoneId === ''}
-				onclick={() => handleZoneSelect('')}
-			>
-				<span class="zone-chip-name">All</span>
-				<span class="zone-chip-count">{venue.zones.length}</span>
-			</button>
-		{/if}
-		{#each venue.zones as zone}
-			<button
-				class="zone-chip"
-				class:active={activeZoneId === zone.id}
-				onclick={() => handleZoneSelect(zone.id)}
-			>
-				{#if zone.zoneType === 'floor'}
-					<span class="zone-chip-icon">L{zone.level}</span>
-				{/if}
-				<span class="zone-chip-name">{zone.name}</span>
-				<span class="zone-chip-count">{zone.areas.length}</span>
-			</button>
-		{/each}
+		<div class="zone-selector">
+			{#if !isFloorVenue}
+				<button
+					class="zone-chip"
+					class:active={activeZoneId === ''}
+					onclick={() => handleZoneSelect('')}
+					disabled={editMode}
+				>
+					<span class="zone-chip-name">All</span>
+					<span class="zone-chip-count">{venue.zones.length}</span>
+				</button>
+			{/if}
+			{#each venue.zones as zone}
+				<button
+					class="zone-chip"
+					class:active={activeZoneId === zone.id}
+					onclick={() => handleZoneSelect(zone.id)}
+					disabled={editMode}
+				>
+					{#if zone.zoneType === 'floor'}
+						<span class="zone-chip-icon">L{zone.level}</span>
+					{/if}
+					<span class="zone-chip-name">{zone.name}</span>
+					<span class="zone-chip-count">{zone.areas.length}</span>
+				</button>
+			{/each}
+		</div>
 	</div>
-	{/if}
 
 	<div class="map-area-wrapper">
 		<div class="map-area" class:placing-label={placingLabel} bind:this={mapContainer} style="--vertex-size: {vertexSize}px;"></div>
@@ -4512,6 +4659,7 @@
 		{/if}
 
 
+	</div>
 	</div>
 
 	{#if editMode && editModeTarget}
@@ -4878,6 +5026,19 @@
 				</div>
 			</div>
 
+			<div class="sp-section">
+				<div class="sp-style-row">
+					<span class="sp-section-label" style="margin-bottom: 0; font-size: 11px;">Vertex Size</span>
+					<input type="range" class="zt-range sp-range-full" min="20" max="50" step="1" bind:value={vertexSize} oninput={() => localStorage.setItem('mapEditor:vertexSize', String(vertexSize))} />
+					<span class="zt-range-val">{vertexSize}</span>
+				</div>
+				<div class="sp-style-row">
+					<span class="sp-section-label" style="margin-bottom: 0; font-size: 11px;">Label Threshold</span>
+					<input type="range" class="zt-range sp-range-full" min="10" max="120" step="5" bind:value={labelScreenThreshold} oninput={() => updateLabelVisibility()} />
+					<span class="zt-range-val">{labelScreenThreshold}px</span>
+				</div>
+			</div>
+
 			{#if !isAreaEdit && !isSpotEdit}
 			<div class="sp-section sp-section-overlay">
 				<span class="sp-section-label">Image Overlay</span>
@@ -4913,15 +5074,6 @@
 				{/if}
 			</div>
 			{:else}
-			<div class="sp-section">
-				<span class="sp-section-label">Shape</span>
-				<div class="sp-style-row">
-					<span class="sp-section-label" style="margin-bottom: 0; font-size: 11px;">Vertex Size</span>
-					<input type="range" class="zt-range sp-range-full" min="20" max="50" step="1" bind:value={vertexSize} oninput={() => localStorage.setItem('mapEditor:vertexSize', String(vertexSize))} />
-					<span class="zt-range-val">{vertexSize}</span>
-				</div>
-				<button class="zt-btn sp-btn-reset" onclick={resetEditModeShapes}>Reset Shape</button>
-			</div>
 
 			<div class="sp-section sp-section-overlay">
 				<span class="sp-section-label">Image Overlay</span>
@@ -5112,6 +5264,18 @@
 		background: #0f172a;
 	}
 
+	.editor-main {
+		display: flex;
+		flex-direction: column;
+		flex: 1;
+		min-height: 0;
+		min-width: 0;
+	}
+
+	.editor-top-bar {
+		flex-shrink: 0;
+	}
+
 	.editor-toolbar {
 		display: flex;
 		flex-direction: column;
@@ -5218,6 +5382,12 @@
 		color: #c7d2fe;
 	}
 
+	.zone-chip:disabled {
+		opacity: 0.5;
+		cursor: default;
+		pointer-events: none;
+	}
+
 	.map-area-wrapper {
 		flex: 1;
 		min-height: 0;
@@ -5235,6 +5405,7 @@
 	/* Side panel (edit mode) */
 	.side-panel {
 		width: 320px;
+		height: 100%;
 		background: #1e293b;
 		border-left: 1px solid #334155;
 		display: flex;
@@ -6249,13 +6420,20 @@
 		white-space: nowrap;
 	}
 
+	:global(.leaflet-tooltip.label-zone),
+	:global(.leaflet-tooltip.label-area),
+	:global(.leaflet-tooltip.label-spot) {
+		background: #fff !important;
+		color: #1e293b !important;
+		border: 1px solid #cbd5e1 !important;
+		border-radius: 4px !important;
+		padding: 2px 6px !important;
+		box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15) !important;
+	}
+
 	:global(.label-zone) {
 		font-weight: 600 !important;
 		font-size: 12px !important;
-	}
-
-	:global(.label-zone::before) {
-		display: none !important;
 	}
 
 	:global(.label-area) {
@@ -6263,17 +6441,26 @@
 		font-size: 11px !important;
 	}
 
+	:global(.label-spot) {
+		font-size: 10px !important;
+	}
+
+	:global(.label-zone::before),
+	:global(.label-area::before),
+	:global(.label-spot::before) {
+		display: none !important;
+	}
+
 	:global(.label-area.leaflet-tooltip-top) {
 		margin-top: -2px !important;
 		transform: translate(0, -100%) !important;
 	}
 
-	:global(.label-area::before) {
+	:global(.hide-spot-labels .label-spot) {
 		display: none !important;
 	}
-
-	:global(.label-spot) {
-		font-size: 10px !important;
+	:global(.hide-spot-labels .label-drag-marker.label-spot) {
+		display: none !important;
 	}
 
 	/* Geocoder FAB styling — lives inside .fab-column */
@@ -6473,8 +6660,11 @@
 		left: -50%;
 		pointer-events: auto;
 		padding: 2px 6px;
-		border-radius: 3px;
-		background: rgba(0,0,0,0.5);
+		border-radius: 4px;
+		background: #fff;
+		color: #1e293b;
+		border: 1px solid #cbd5e1;
+		box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15);
 	}
 	:global(.label-drag-marker.label-zone span) {
 		font-weight: 600;
@@ -6483,6 +6673,9 @@
 	:global(.label-drag-marker.label-area span) {
 		font-weight: 500;
 		font-size: 11px;
+	}
+	:global(.label-drag-marker.label-spot span) {
+		font-size: 10px;
 	}
 	:global(.leaflet-dragging .label-drag-marker) {
 		cursor: grabbing !important;
